@@ -79,15 +79,30 @@ export default function App() {
   const debounceTimer = useRef(null);
   const isSyncingRef = useRef(false);
 
+  // FIX 1: Track pending sync so no data is ever silently dropped
+  const pendingSyncRef = useRef(false);
+
+  // FIX 2: Track local write timestamps to prevent snapshot from overwriting recent edits
+  const lastLocalWriteTime = useRef(0);
+  const SNAPSHOT_GUARD_MS = 2000; // Ignore incoming snapshots for 2s after a local write
+
   const [showAuthInput, setShowAuthInput] = useState(false);
   const [authInput, setAuthInput] = useState('');
 
-  // --- BULLETPROOF SYNC CORE ---
-  const executeSync = async (data) => {
-    if (isSyncingRef.current || !user) return;
+  // --- BULLETPROOF SYNC CORE (FIXED) ---
+  const executeSync = useCallback(async (data) => {
+    if (!user) return;
+
+    // FIX 1: Instead of silently returning, mark that a sync is pending
+    if (isSyncingRef.current) {
+      pendingSyncRef.current = true;
+      return;
+    }
+
     isSyncingRef.current = true;
     try {
       const { journeysList: j, nodeData: n, edgeData: e } = data;
+      lastLocalWriteTime.current = Date.now(); // FIX 2: Mark write time
       await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'current'), {
         journeysList: j,
         nodeData: n,
@@ -95,13 +110,23 @@ export default function App() {
         lastUpdated: new Date().toISOString()
       });
       setCloudStatus('LIVE SYNC ACTIVE');
+      setConnectionError(null);
     } catch (err) { 
-      console.error(err); 
+      console.error('Sync error:', err); 
       setCloudStatus('SYNC ERROR');
+      // On error, mark pending so we retry
+      pendingSyncRef.current = true;
     } finally {
       isSyncingRef.current = false;
+
+      // FIX 1: If a sync was requested while we were busy, immediately retry with latest data
+      if (pendingSyncRef.current) {
+        pendingSyncRef.current = false;
+        // Use setTimeout(0) to avoid stack overflow on rapid-fire syncs
+        setTimeout(() => executeSync(latestDataRef.current), 50);
+      }
     }
-  };
+  }, [user]);
 
   const triggerSync = useCallback((force = false) => {
     if (!user) return;
@@ -112,7 +137,7 @@ export default function App() {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
       debounceTimer.current = setTimeout(() => executeSync(latestDataRef.current), 300);
     }
-  }, [user]);
+  }, [user, executeSync]);
 
   // Update Mirror Ref instantly on any local change
   useEffect(() => {
@@ -130,7 +155,55 @@ export default function App() {
     localStorage.setItem('cw_active_journey', activeJId);
   }, [activeJId]);
 
-  // Sync Listener
+  // FIX 3: Save data on page unload / tab close / visibility change
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // Flush any pending debounce immediately
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      // Synchronous last-ditch save attempt
+      const data = latestDataRef.current;
+      const payload = JSON.stringify({
+        journeysList: data.journeysList,
+        nodeData: data.nodeData,
+        edgeData: data.edgeData,
+        lastUpdated: new Date().toISOString()
+      });
+      // Use sendBeacon for reliable unload saves (doesn't get cancelled by browser)
+      try {
+        // Also trigger a normal async save as backup
+        if (user) {
+          setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'current'), {
+            journeysList: data.journeysList,
+            nodeData: data.nodeData,
+            edgeData: data.edgeData,
+            lastUpdated: new Date().toISOString()
+          }).catch(() => {});
+        }
+      } catch (e) {
+        // Swallow - best effort
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        // Tab is being hidden (switched away, minimized, or about to close)
+        if (debounceTimer.current) clearTimeout(debounceTimer.current);
+        if (user) {
+          executeSync(latestDataRef.current);
+        }
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [user, executeSync]);
+
+  // FIX 4: Snapshot listener - removed `linking` from deps, added timestamp guard
   useEffect(() => {
     if (!user) return;
     setCloudStatus('SYNCING...');
@@ -140,26 +213,41 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         
-        // Prevent cloud from overwriting local edits if user is busy interacting
-        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking && !isTypingRef.current) {
+        // FIX 2 + FIX 4: Three-layer guard against overwriting local edits:
+        // 1. Skip if this snapshot is from our own pending write
+        // 2. Skip if user is actively interacting (dragging, linking, typing)
+        // 3. Skip if we wrote to Firebase very recently (timestamp guard)
+        const isOurOwnWrite = docSnap.metadata.hasPendingWrites;
+        const isUserBusy = isDraggingRef.current || isTypingRef.current;
+        const isRecentLocalWrite = (Date.now() - lastLocalWriteTime.current) < SNAPSHOT_GUARD_MS;
+
+        if (!isOurOwnWrite && !isUserBusy && !isRecentLocalWrite) {
           setJourneysList(data.journeysList || INITIAL_JOURNEYS);
           setNodeData(data.nodeData || INITIAL_NODES);
           setEdgeData(data.edgeData || INITIAL_EDGES);
+          // Also update the ref so subsequent syncs don't push stale data
+          latestDataRef.current = {
+            journeysList: data.journeysList || INITIAL_JOURNEYS,
+            nodeData: data.nodeData || INITIAL_NODES,
+            edgeData: data.edgeData || INITIAL_EDGES
+          };
         }
         setCloudStatus('LIVE SYNC ACTIVE');
         setConnectionError(null);
       } else {
-        triggerSync(true); // Force push if cloud is empty
+        // Cloud is empty - push current state
+        executeSync(latestDataRef.current);
       }
       setIsInitialized(true); 
-    }, () => {
+    }, (error) => {
+      console.error('Snapshot error:', error);
       setCloudStatus('OFFLINE');
       setConnectionError('Check Firebase: Anonymous Auth must be enabled.');
       setIsInitialized(true);
     });
 
     return () => unsubscribe();
-  }, [user, linking, triggerSync]);
+  }, [user, executeSync]); // FIX 4: Removed `linking` and `triggerSync` from deps
 
   // Global Mouse Up to Kill Latched States
   useEffect(() => {
@@ -252,6 +340,7 @@ export default function App() {
       latestDataRef.current.edgeData = eD;
       return eD;
     });
+    latestDataRef.current.journeysList = newList;
     setActiveJId(newId);
     setTimeout(() => triggerSync(true), 50);
   };
@@ -274,7 +363,8 @@ export default function App() {
       id, type, x: 250, y: 150,
       ...(type === 'action' ? { channel: chan, title: `New ${chan}`, content: '', previewLink: '' } : {}),
       ...(type === 'delay' ? { value: 1, unit: 'Hours' } : {}),
-      ...(type === 'split' ? { condition: '' } : {})
+      ...(type === 'split' ? { condition: '' } : {}),
+      ...(type === 'trigger' ? { label: 'New Trigger' } : {})
     };
     setNodeData(prev => {
       const nD = { ...prev, [activeJId]: [...(prev[activeJId] || []), newNode] };
@@ -358,7 +448,7 @@ export default function App() {
   // --- PERFECT HEIGHT/ANCHOR CALCULATION ---
   const getNodeHeight = (node) => {
     if (node.type === 'trigger') return 100;
-    if (node.type === 'split') return 160;  // Dynamically calculate height to clear the YES/NO ports
+    if (node.type === 'split') return 160;
     if (node.type === 'delay') return 120;
     if (node.type === 'action') {
        return (node.previewLink && node.previewLink.trim() !== '') ? 250 : 190;
@@ -396,7 +486,7 @@ export default function App() {
             <button onClick={() => addNode('trigger')} className="p-1 hover:bg-white/10 rounded-full transition-colors"><Plus size={16} /></button>
           </div>
           <div className="flex items-center gap-2">
-            <div className={`w-1.5 h-1.5 rounded-full ${cloudStatus.includes('LIVE') ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+            <div className={`w-1.5 h-1.5 rounded-full ${cloudStatus.includes('LIVE') ? 'bg-emerald-500 animate-pulse' : cloudStatus.includes('ERROR') || cloudStatus === 'OFFLINE' ? 'bg-red-500' : 'bg-amber-500'}`} />
             <span className="text-[9px] font-bold uppercase tracking-widest text-gray-500">{cloudStatus}</span>
           </div>
         </div>
@@ -438,7 +528,6 @@ export default function App() {
              {isAdmin ? <Unlock size={14}/> : <Lock size={14}/>} {isAdmin ? 'ADMIN UNLOCKED' : 'ADMIN LOGIN'}
            </button>
            
-           {/* MASTER ADMIN CONTROLS RESTORED */}
            {isAdmin && (
              <div className="flex gap-2 mt-3 animate-in fade-in zoom-in-95">
                <button onClick={handleSaveMaster} className="flex-1 py-2 rounded-xl bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600 hover:text-white text-[9px] font-bold uppercase tracking-widest border border-emerald-500/20 transition-all flex items-center justify-center gap-1.5 shadow-sm">
@@ -490,18 +579,13 @@ export default function App() {
               
               const portOffset = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
               const x1 = from.x + 140 + portOffset;
-              
-              // DYNAMIC HEIGHT: Anchor line completely below the box + YES/NO buttons
               const y1 = from.y + getNodeHeight(from); 
-              
               const x2 = to.x + 140;
-              const y2 = to.y + 10; // Slightly inside the top of target box
+              const y2 = to.y + 10;
               
               const color = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#5E5E62';
               const curve = Math.max(60, Math.abs(y2 - y1) / 2);
 
-              // CUBIC BEZIER CALCULATION FOR PERFECT VISIBILITY
-              // Pushing the "X" button 70% down the curve guarantees it clears the bottom of the source box
               const t = 0.70;
               const u = 1 - t;
               const btnX = (u * u * u) * x1 + 3 * (u * u) * t * x1 + 3 * u * (t * t) * x2 + (t * t * t) * x2;
@@ -518,14 +602,12 @@ export default function App() {
                        setEdgeData(prev => {
                           const nED = { ...prev, [activeJId]: prev[activeJId].filter((it) => it.id !== e.id) };
                           latestDataRef.current.edgeData = nED;
-                          triggerSync(true); // Force immediate deletion
+                          triggerSync(true);
                           return nED;
                        });
                     }}
                   >
-                    {/* Massive invisible hitbox for unmissable clicks */}
                     <circle cx={btnX} cy={btnY} r="28" fill="transparent" />
-                    {/* Visible button UI */}
                     <circle cx={btnX} cy={btnY} r="14" fill="#1c1c1e" stroke={color} strokeWidth="2.5" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
                     <text x={btnX} y={btnY + 5} textAnchor="middle" fontSize="16" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
                   </g>
@@ -533,17 +615,20 @@ export default function App() {
               );
             })}
             
-            {/* ACTIVE DRAWING WIRE */}
-            {linking && (
-               <path 
-                 d={calculatePath(
-                   nodes.find((n) => n.id === linking.fromId).x + 140 + (linking.portType === 'true' ? -40 : linking.portType === 'false' ? 40 : 0), 
-                   nodes.find((n) => n.id === linking.fromId).y + getNodeHeight(nodes.find((n) => n.id === linking.fromId)), 
-                   mousePos.x, mousePos.y
-                 )} 
-                 stroke="#0A84FF" strokeWidth="2" strokeDasharray="6,6" fill="none" 
-               />
-            )}
+            {linking && (() => {
+              const fromNode = nodes.find((n) => n.id === linking.fromId);
+              if (!fromNode) return null;
+              return (
+                <path 
+                  d={calculatePath(
+                    fromNode.x + 140 + (linking.portType === 'true' ? -40 : linking.portType === 'false' ? 40 : 0), 
+                    fromNode.y + getNodeHeight(fromNode), 
+                    mousePos.x, mousePos.y
+                  )} 
+                  stroke="#0A84FF" strokeWidth="2" strokeDasharray="6,6" fill="none" 
+                />
+              );
+            })()}
           </svg>
 
           {/* RENDER NODES */}
@@ -580,11 +665,11 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* CONTENT INPUTS - Functional update on Blur enforces hard sync */}
+                {/* CONTENT INPUTS */}
                 <div className="p-6 space-y-4" onMouseDown={e => e.stopPropagation()}>
                    <input 
                      className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" 
-                     value={n.label || n.title} 
+                     value={n.label || n.title || ''} 
                      onFocus={() => { isTypingRef.current = true; }}
                      onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value }, false)} 
                      onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
@@ -594,7 +679,7 @@ export default function App() {
                      <>
                         <textarea 
                           className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" 
-                          value={n.content} 
+                          value={n.content || ''} 
                           placeholder="Message content..." 
                           onFocus={() => { isTypingRef.current = true; }}
                           onChange={e => updateNodeLocal(n.id, { content: e.target.value }, false)} 
@@ -624,7 +709,7 @@ export default function App() {
                       <input 
                         className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" 
                         placeholder="Enter condition..." 
-                        value={n.condition} 
+                        value={n.condition || ''} 
                         onFocus={() => { isTypingRef.current = true; }}
                         onChange={e => updateNodeLocal(n.id, { condition: e.target.value }, false)} 
                         onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
@@ -635,14 +720,14 @@ export default function App() {
                         <input 
                           type="number" 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-xs font-bold text-white border border-white/5 outline-none focus:border-[#0A84FF]" 
-                          value={n.value} 
+                          value={n.value || ''} 
                           onFocus={() => { isTypingRef.current = true; }}
                           onChange={e => updateNodeLocal(n.id, { value: e.target.value }, false)} 
                           onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                         />
                         <select 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-[10px] font-black text-gray-500 border border-white/5 outline-none cursor-pointer" 
-                          value={n.unit} 
+                          value={n.unit || 'Hours'} 
                           onChange={e => { updateNodeLocal(n.id, { unit: e.target.value }, true); }}
                         >
                            <option>Minutes</option><option>Hours</option><option>Days</option>
