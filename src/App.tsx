@@ -91,7 +91,7 @@ function CanvasApp() {
     return () => unsubscribe();
   }, []);
 
-  // 2. High-Speed Sync
+  // 2. High-Speed Sync (No feedback loops)
   useEffect(() => {
     if (!user) return;
     setCloudStatus('SYNCING...');
@@ -100,14 +100,15 @@ function CanvasApp() {
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current) {
+        // RULE: Never overwrite local data if we are currently performing an operation
+        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking) {
           if (data.journeysList) setJourneysList(data.journeysList);
           if (data.nodeData) setNodeData(data.nodeData);
           if (data.edgeData) setEdgeData(data.edgeData);
         }
         setCloudStatus('LIVE SYNC ACTIVE');
         setConnectionError(null);
-      } else if (!docSnap.exists()) {
+      } else {
         syncToCloud(INITIAL_JOURNEYS, INITIAL_NODES, INITIAL_EDGES, true);
       }
     }, (err) => {
@@ -118,25 +119,27 @@ function CanvasApp() {
     return () => unsubscribe();
   }, [user]);
 
-  // 3. GLOBAL MOUSE UP FIX - Prevents box latching
+  // 3. GLOBAL MOUSE UP FIX - Prevents box latching & Triggers Instant Save
   useEffect(() => {
     const handleGlobalRelease = () => {
-      if (dragNode) {
+      if (dragNode || linking) {
         isDraggingRef.current = false;
-        syncToCloud(journeysList, nodeData, edgeData, true);
+        // Trigger an INSTANT sync when interaction ends (force=true)
+        executeSync(journeysList, nodeData, edgeData);
       }
       setDragNode(null);
       setLinking(null);
     };
     window.addEventListener('mouseup', handleGlobalRelease);
     return () => window.removeEventListener('mouseup', handleGlobalRelease);
-  }, [dragNode, journeysList, nodeData, edgeData]);
+  }, [dragNode, linking, journeysList, nodeData, edgeData]);
 
-  const syncToCloud = async (jList: any, nData: any, eData: any, force = false) => {
+  // Debounced Sync for Typing, Instant for Actions
+  const syncToCloud = (jList: any, nData: any, eData: any, force = false) => {
     if (!user) return;
     if (!force) {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 400);
+      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 300);
     } else {
       executeSync(jList, nData, eData);
     }
@@ -151,9 +154,10 @@ function CanvasApp() {
         lastUpdated: new Date().toISOString()
       });
       setCloudStatus('LIVE SYNC ACTIVE');
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error("Write Error:", e); }
   };
 
+  // Interaction Handlers
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -175,12 +179,12 @@ function CanvasApp() {
       const newEdge = { id: `e-${Date.now()}`, from: linking.fromId, to: targetId, port: linking.portType };
       const newEdgeData = { ...edgeData, [activeJId]: [...(edgeData[activeJId] || []), newEdge] };
       setEdgeData(newEdgeData);
-      syncToCloud(journeysList, nodeData, newEdgeData, true);
+      syncToCloud(journeysList, nodeData, newEdgeData, true); // Instant save on link
     }
     setLinking(null);
-    setDragNode(null);
   };
 
+  // CRUD Helpers
   const addNode = (type: string, chan = 'WhatsApp') => {
     const id = `node-${Date.now()}`;
     const newNode = {
@@ -191,14 +195,14 @@ function CanvasApp() {
     };
     const newNodeData = { ...nodeData, [activeJId]: [...(nodeData[activeJId] || []), newNode] };
     setNodeData(newNodeData);
-    syncToCloud(journeysList, newNodeData, edgeData);
+    syncToCloud(journeysList, newNodeData, edgeData, true); // Instant save on add
   };
+
+  const calculatePath = (x1: number, y1: number, x2: number, y2: number) => `M ${x1} ${y1} C ${x1} ${y1 + 120}, ${x2} ${y2 - 120}, ${x2} ${y2}`;
 
   const nodes = nodeData[activeJId] || [];
   const edges = edgeData[activeJId] || [];
   const activeJourney = journeysList.find(j => j.id === activeJId);
-
-  const calculatePath = (x1: number, y1: number, x2: number, y2: number) => `M ${x1} ${y1} C ${x1} ${y1 + 120}, ${x2} ${y2 - 120}, ${x2} ${y2}`;
 
   return (
     <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden select-none" onMouseMove={handleMouseMove}>
@@ -211,7 +215,7 @@ function CanvasApp() {
             <button onClick={() => addNode('trigger')} className="p-1 hover:bg-white/10 rounded-full transition-colors"><Plus size={16} /></button>
           </div>
           <div className="flex items-center gap-2">
-            <div className={`w-1.5 h-1.5 rounded-full ${cloudStatus.includes('LIVE') ? 'bg-emerald-500 animate-pulse' : 'bg-red-500'}`} />
+            <div className={`w-1.5 h-1.5 rounded-full ${cloudStatus.includes('LIVE') ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
             <span className="text-[9px] font-bold uppercase tracking-widest text-gray-500">{cloudStatus}</span>
           </div>
         </div>
@@ -231,14 +235,14 @@ function CanvasApp() {
                     setNodeData(newNodeData);
                     setEdgeData(newEdgeData);
                     syncToCloud(newList, newNodeData, newEdgeData, true);
-                 }} className="p-1 text-white/40 hover:text-white"><Copy size={11}/></button>
-                 <button onClick={(e) => { e.stopPropagation(); const nl = journeysList.filter(it => it.id !== j.id); setJourneysList(nl); syncToCloud(nl, nodeData, edgeData, true); }} className="p-1 text-white/40 hover:text-red-500"><Trash2 size={11}/></button>
+                 }} className="p-1 text-white/40 hover:text-white" title="Copy Journey"><Copy size={11}/></button>
+                 <button onClick={(e) => { e.stopPropagation(); const nl = journeysList.filter(it => it.id !== j.id); setJourneysList(nl); syncToCloud(nl, nodeData, edgeData, true); }} className="p-1 text-white/40 hover:text-red-500" title="Delete Journey"><Trash2 size={11}/></button>
               </div>
             </div>
           ))}
         </div>
 
-        <div className="p-4 border-t border-white/10">
+        <div className="p-4 border-t border-white/10 bg-[#1c1c1e]">
            {showAuthInput && !isAdmin && (
              <div className="mb-3 flex gap-2 animate-in fade-in zoom-in-95">
                <input type="password" placeholder="Passcode..." className="flex-1 bg-black border border-white/10 rounded-lg px-3 py-2 text-[11px] text-white outline-none focus:border-[#0A84FF]" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === 'admin2024' && (setIsAdmin(true), setShowAuthInput(false))} />
@@ -247,6 +251,14 @@ function CanvasApp() {
            <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 text-[9px] font-bold uppercase tracking-widest text-gray-500 hover:text-white transition-all">
              {isAdmin ? <Unlock size={14}/> : <Lock size={14}/>} {isAdmin ? 'ADMIN UNLOCKED' : 'ADMIN LOGIN'}
            </button>
+           {isAdmin && (
+             <button 
+                onClick={() => executeSync(journeysList, nodeData, edgeData)}
+                className="w-full mt-3 py-3 rounded-xl bg-emerald-600/20 text-emerald-400 text-[9px] font-bold uppercase tracking-widest hover:bg-emerald-600 hover:text-white transition-all flex items-center justify-center gap-2 border border-emerald-500/30"
+             >
+                <Save size={14}/> Force Cloud Save
+             </button>
+           )}
         </div>
       </aside>
 
@@ -325,10 +337,11 @@ function CanvasApp() {
                   <div className="flex gap-1 items-center">
                     <button onClick={(e) => { 
                         e.stopPropagation();
+                        const nodesInCurrent = nodeData[activeJId] || [];
                         const newNode = { ...n, id: `node-${Date.now()}`, x: n.x + 30, y: n.y + 30 };
-                        const nd = [...nodes, newNode];
+                        const nd = [...nodesInCurrent, newNode];
                         setNodeData({...nodeData, [activeJId]: nd});
-                        syncToCloud(journeysList, nd, edgeData);
+                        syncToCloud(journeysList, {...nodeData, [activeJId]: nd}, edgeData, true);
                     }} className="p-1 text-gray-600 hover:text-white transition-colors" title="Copy Block"><Copy size={11}/></button>
                     <button className="p-1 text-gray-600 hover:text-red-500" onClick={(e) => { 
                         e.stopPropagation();
@@ -346,16 +359,18 @@ function CanvasApp() {
                    <input className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" value={n.label || n.title} onChange={e => {
                        const upd = { label: e.target.value, title: e.target.value };
                        const nd = nodes.map((it: any) => it.id === n.id ? {...it, ...upd} : it);
-                       setNodeData({...nodeData, [activeJId]: nd});
-                       syncToCloud(journeysList, nd, edgeData);
+                       const newNodeData = {...nodeData, [activeJId]: nd};
+                       setNodeData(newNodeData);
+                       syncToCloud(journeysList, newNodeData, edgeData);
                    }} />
                    
                    {n.type === 'action' && (
                      <>
                         <textarea className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" value={n.content} placeholder="Message content..." onChange={e => {
                             const nd = nodes.map((it: any) => it.id === n.id ? {...it, content: e.target.value} : it);
-                            setNodeData({...nodeData, [activeJId]: nd});
-                            syncToCloud(journeysList, nd, edgeData);
+                            const newNodeData = {...nodeData, [activeJId]: nd};
+                            setNodeData(newNodeData);
+                            syncToCloud(journeysList, newNodeData, edgeData);
                         }} />
                         <div className="flex flex-col gap-1 mt-1">
                            <span className="text-[8px] font-black uppercase tracking-widest text-gray-600 text-left">Preview / Media URL</span>
@@ -363,8 +378,9 @@ function CanvasApp() {
                               <div className="pl-2 text-gray-600"><LinkIcon size={10} /></div>
                               <input className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" placeholder="Paste link..." value={n.previewLink || ''} onChange={e => {
                                   const nd = nodes.map((it: any) => it.id === n.id ? {...it, previewLink: e.target.value} : it);
-                                  setNodeData({...nodeData, [activeJId]: nd});
-                                  syncToCloud(journeysList, nd, edgeData);
+                                  const newNodeData = {...nodeData, [activeJId]: nd};
+                                  setNodeData(newNodeData);
+                                  syncToCloud(journeysList, newNodeData, edgeData);
                               }} />
                            </div>
                            {n.previewLink && n.previewLink.trim() !== '' && (
@@ -376,8 +392,9 @@ function CanvasApp() {
                    {n.type === 'split' && (
                       <input className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" placeholder="Enter condition..." value={n.condition} onChange={e => {
                           const nd = nodes.map((it: any) => it.id === n.id ? {...it, condition: e.target.value} : it);
-                          setNodeData({...nodeData, [activeJId]: nd});
-                          syncToCloud(journeysList, nd, edgeData);
+                          const newNodeData = {...nodeData, [activeJId]: nd};
+                          setNodeData(newNodeData);
+                          syncToCloud(journeysList, newNodeData, edgeData);
                       }} />
                    )}
                 </div>
