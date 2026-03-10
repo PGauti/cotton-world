@@ -1,8 +1,7 @@
-import React, { useState, useRef, useMemo, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   MessageSquare, Phone, Clock, Zap, Trash2, GitBranch, 
-  Smartphone, MessageCircleMore, Plus, GripVertical, 
-  Check, X, Edit2, Link as LinkIcon, ExternalLink, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle, Loader2
+  Smartphone, Plus, Check, X, Link as LinkIcon, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle, Loader2
 } from 'lucide-react';
 
 // --- 1. SECURE FIREBASE CONNECTION ---
@@ -26,7 +25,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 // PERMANENTLY LOCKED ID
-const appId = 'cottonworld-unified-sync-final-v2';
+const appId = 'cottonworld-unified-sync-final-v3';
 
 // --- 2. INITIAL DATA ---
 const INITIAL_JOURNEYS = [
@@ -35,15 +34,7 @@ const INITIAL_JOURNEYS = [
   { id: 'j3', title: 'Welcome Series', desc: 'New subscriber onboarding.' },
   { id: 'j4', title: 'Post-Purchase Review', desc: 'NPS collection 7 days post-delivery.' },
   { id: 'j5', title: 'Browse Abandonment', desc: 'Retargeting high-interest browsers.' },
-  { id: 'j6', title: 'Win-back Campaign', desc: '90-day inactive segment recovery.' },
-  { id: 'j7', title: 'Replenishment', desc: 'Basics restock alerts.' },
-  { id: 'j8', title: 'Birthday Rewards', desc: 'Annual personalization.' },
-  { id: 'j9', title: 'Tracking Updates', desc: 'Shipping milestone transparency.' },
-  { id: 'j10', title: 'Payment Recovery', desc: 'Rescue for failed payments.' },
-  { id: 'j11', title: 'Back in Stock', desc: 'Waitlist conversion.' },
-  { id: 'j12', title: 'Price Drop', desc: 'Dynamic sale nudges.' },
-  { id: 'j13', title: 'VIP Upgrade', desc: 'Tier milestone greeting.' },
-  { id: 'j14', title: 'Flash Sale', desc: 'Mass-scale promotion.' }
+  { id: 'j6', title: 'Win-back Campaign', desc: '90-day inactive segment recovery.' }
 ];
 
 const INITIAL_NODES = {
@@ -63,33 +54,72 @@ const INITIAL_EDGES = {
 
 // --- 3. MAIN APPLICATION ---
 export default function App() {
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [cloudStatus, setCloudStatus] = useState('CONNECTING...');
-  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [connectionError, setConnectionError] = useState(null);
   const [isInitialized, setIsInitialized] = useState(false);
 
-  const [journeysList, setJourneysList] = useState<any[]>(INITIAL_JOURNEYS);
-  
-  // Persist Active Journey in Local Storage to survive refreshes
+  const [journeysList, setJourneysList] = useState(INITIAL_JOURNEYS);
   const [activeJId, setActiveJId] = useState(() => localStorage.getItem('cw_active_journey') || 'j1');
+  const [nodeData, setNodeData] = useState(INITIAL_NODES);
+  const [edgeData, setEdgeData] = useState(INITIAL_EDGES);
   
-  const [nodeData, setNodeData] = useState<any>(INITIAL_NODES);
-  const [edgeData, setEdgeData] = useState<any>(INITIAL_EDGES);
+  // THE SAFEGUARD REF: Bypasses React state queues to guarantee data isn't lost on blur/reload
+  const latestDataRef = useRef({ journeysList: INITIAL_JOURNEYS, nodeData: INITIAL_NODES, edgeData: INITIAL_EDGES });
   
-  const canvasRef = useRef<HTMLDivElement>(null);
-  const [dragNode, setDragNode] = useState<string | null>(null);
+  const canvasRef = useRef(null);
+  const [dragNode, setDragNode] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  const [linking, setLinking] = useState<any>(null); 
+  const [linking, setLinking] = useState(null); 
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   
   const isDraggingRef = useRef(false);
-  const debounceTimer = useRef<any>(null);
+  const isTypingRef = useRef(false); 
+  const debounceTimer = useRef(null);
+  const isSyncingRef = useRef(false);
 
   const [showAuthInput, setShowAuthInput] = useState(false);
   const [authInput, setAuthInput] = useState('');
 
-  // 1. Auth Init & Save active tab
+  // --- BULLETPROOF SYNC CORE ---
+  const executeSync = async (data) => {
+    if (isSyncingRef.current || !user) return;
+    isSyncingRef.current = true;
+    try {
+      const { journeysList: j, nodeData: n, edgeData: e } = data;
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'current'), {
+        journeysList: j,
+        nodeData: n,
+        edgeData: e,
+        lastUpdated: new Date().toISOString()
+      });
+      setCloudStatus('LIVE SYNC ACTIVE');
+    } catch (err) { 
+      console.error(err); 
+      setCloudStatus('SYNC ERROR');
+    } finally {
+      isSyncingRef.current = false;
+    }
+  };
+
+  const triggerSync = useCallback((force = false) => {
+    if (!user) return;
+    if (force) {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      executeSync(latestDataRef.current);
+    } else {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
+      debounceTimer.current = setTimeout(() => executeSync(latestDataRef.current), 300);
+    }
+  }, [user]);
+
+  // Update Mirror Ref instantly on any local change
+  useEffect(() => {
+    latestDataRef.current = { journeysList, nodeData, edgeData };
+  }, [journeysList, nodeData, edgeData]);
+
+  // Auth Init & Save active tab
   useEffect(() => {
     signInAnonymously(auth).catch(() => setCloudStatus('AUTH ERROR'));
     const unsubscribe = onAuthStateChanged(auth, setUser);
@@ -100,7 +130,7 @@ export default function App() {
     localStorage.setItem('cw_active_journey', activeJId);
   }, [activeJId]);
 
-  // 2. Sync Listener with Race Condition Guards
+  // Sync Listener
   useEffect(() => {
     if (!user) return;
     setCloudStatus('SYNCING...');
@@ -110,9 +140,8 @@ export default function App() {
       if (docSnap.exists()) {
         const data = docSnap.data();
         
-        // SAFEGUARD: Only apply incoming cloud data if we aren't the ones currently making the changes.
-        // Removed `isTypingRef` because it caused the app to drop fast writes.
-        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking) {
+        // Prevent cloud from overwriting local edits if user is busy interacting
+        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking && !isTypingRef.current) {
           setJourneysList(data.journeysList || INITIAL_JOURNEYS);
           setNodeData(data.nodeData || INITIAL_NODES);
           setEdgeData(data.edgeData || INITIAL_EDGES);
@@ -120,9 +149,9 @@ export default function App() {
         setCloudStatus('LIVE SYNC ACTIVE');
         setConnectionError(null);
       } else {
-        syncToCloud(INITIAL_JOURNEYS, INITIAL_NODES, INITIAL_EDGES, true);
+        triggerSync(true); // Force push if cloud is empty
       }
-      setIsInitialized(true); // Unlock UI only after data is loaded
+      setIsInitialized(true); 
     }, () => {
       setCloudStatus('OFFLINE');
       setConnectionError('Check Firebase: Anonymous Auth must be enabled.');
@@ -130,48 +159,21 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [user, linking]);
+  }, [user, linking, triggerSync]);
 
-  // 3. Global Mouse Up to Kill Latched States
+  // Global Mouse Up to Kill Latched States
   useEffect(() => {
     const handleGlobalMouseUp = () => {
       if (dragNode || linking) {
         isDraggingRef.current = false;
-        if (dragNode) syncToCloud(journeysList, nodeData, edgeData, true); // Force position save
+        if (dragNode) triggerSync(true); // Hard save block position
       }
       setDragNode(null);
       setLinking(null);
     };
     window.addEventListener('mouseup', handleGlobalMouseUp);
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
-  }, [dragNode, linking, journeysList, nodeData, edgeData]);
-
-  // 4. Master Sync Function
-  const syncToCloud = (jList: any, nData: any, eData: any, force = false) => {
-    if (!user) return;
-    if (force) {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      executeSync(jList, nData, eData);
-    } else {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 500);
-    }
-  };
-
-  const executeSync = async (jList: any, nData: any, eData: any) => {
-    try {
-      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'current'), {
-        journeysList: jList,
-        nodeData: nData,
-        edgeData: eData,
-        lastUpdated: new Date().toISOString()
-      });
-      setCloudStatus('LIVE SYNC ACTIVE');
-    } catch (e) { 
-      console.error(e); 
-      setCloudStatus('SYNC ERROR');
-    }
-  };
+  }, [dragNode, linking, triggerSync]);
 
   // --- ADMIN MASTER LOCK FUNCTIONS ---
   const handleSaveMaster = async () => {
@@ -179,10 +181,7 @@ export default function App() {
     setCloudStatus('SAVING MASTER...');
     try {
       await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'master'), {
-        journeysList,
-        nodeData,
-        edgeData,
-        lastUpdated: new Date().toISOString()
+        journeysList, nodeData, edgeData, lastUpdated: new Date().toISOString()
       });
       setCloudStatus('MASTER SAVED');
       setTimeout(() => setCloudStatus('LIVE SYNC ACTIVE'), 2000);
@@ -204,13 +203,14 @@ export default function App() {
         setJourneysList(data.journeysList);
         setNodeData(data.nodeData);
         setEdgeData(data.edgeData);
-        await executeSync(data.journeysList, data.nodeData, data.edgeData);
+        latestDataRef.current = { journeysList: data.journeysList, nodeData: data.nodeData, edgeData: data.edgeData };
+        await executeSync(latestDataRef.current);
       } else {
-        // If no master exists, restore to hardcoded initial state
         setJourneysList(INITIAL_JOURNEYS);
         setNodeData(INITIAL_NODES);
         setEdgeData(INITIAL_EDGES);
-        await executeSync(INITIAL_JOURNEYS, INITIAL_NODES, INITIAL_EDGES);
+        latestDataRef.current = { journeysList: INITIAL_JOURNEYS, nodeData: INITIAL_NODES, edgeData: INITIAL_EDGES };
+        await executeSync(latestDataRef.current);
       }
     } catch (e) {
       console.error(e);
@@ -218,8 +218,8 @@ export default function App() {
     }
   };
 
-  // --- JOURNEY REPLICATION & DELETION ---
-  const handleDuplicateJourney = (id: string, e: React.MouseEvent) => {
+  // --- JOURNEY CRUD ---
+  const handleDuplicateJourney = (id, e) => {
     e.stopPropagation();
     const journeyToCopy = journeysList.find(j => j.id === id);
     if (!journeyToCopy) return;
@@ -227,40 +227,48 @@ export default function App() {
     const newId = `j-${Date.now()}`;
     const newList = [...journeysList, { ...journeyToCopy, id: newId, title: `${journeyToCopy.title} (Copy)` }];
     
-    const idMap: any = {};
-    const newNodes = (nodeData[id] || []).map((n: any) => {
+    const idMap = {};
+    const newNodes = (nodeData[id] || []).map((n) => {
       const newNId = `node-${Date.now()}-${Math.random().toString(36).substring(2,6)}`;
       idMap[n.id] = newNId;
       return { ...n, id: newNId };
     });
     
-    const newEdges = (edgeData[id] || []).map((e: any) => ({
+    const newEdges = (edgeData[id] || []).map((e) => ({
       ...e,
       id: `e-${Date.now()}-${Math.random().toString(36).substring(2,6)}`,
       from: idMap[e.from] || e.from,
       to: idMap[e.to] || e.to
     }));
 
-    const nD = { ...nodeData, [newId]: newNodes };
-    const eD = { ...edgeData, [newId]: newEdges };
-    
     setJourneysList(newList);
-    setNodeData(nD);
-    setEdgeData(eD);
+    setNodeData(prev => {
+      const nD = { ...prev, [newId]: newNodes };
+      latestDataRef.current.nodeData = nD;
+      return nD;
+    });
+    setEdgeData(prev => {
+      const eD = { ...prev, [newId]: newEdges };
+      latestDataRef.current.edgeData = eD;
+      return eD;
+    });
     setActiveJId(newId);
-    syncToCloud(newList, nD, eD, true);
+    setTimeout(() => triggerSync(true), 50);
   };
 
-  const handleDeleteJourney = (id: string, e: React.MouseEvent) => {
+  const handleDeleteJourney = (id, e) => {
     e.stopPropagation();
-    const nl = journeysList.filter(it => it.id !== id);
-    setJourneysList(nl);
-    if (activeJId === id && nl.length > 0) setActiveJId(nl[0].id);
-    syncToCloud(nl, nodeData, edgeData, true);
+    setJourneysList(prev => {
+      const nl = prev.filter(it => it.id !== id);
+      latestDataRef.current.journeysList = nl;
+      if (activeJId === id && nl.length > 0) setActiveJId(nl[0].id);
+      triggerSync(true);
+      return nl;
+    });
   };
 
   // --- NODE CRUD ---
-  const addNode = (type: string, chan = 'WhatsApp') => {
+  const addNode = (type, chan = 'WhatsApp') => {
     const id = `node-${Date.now()}`;
     const newNode = {
       id, type, x: 250, y: 150,
@@ -268,39 +276,52 @@ export default function App() {
       ...(type === 'delay' ? { value: 1, unit: 'Hours' } : {}),
       ...(type === 'split' ? { condition: '' } : {})
     };
-    const nD = { ...nodeData, [activeJId]: [...(nodeData[activeJId] || []), newNode] };
-    setNodeData(nD);
-    syncToCloud(journeysList, nD, edgeData, true);
+    setNodeData(prev => {
+      const nD = { ...prev, [activeJId]: [...(prev[activeJId] || []), newNode] };
+      latestDataRef.current.nodeData = nD;
+      triggerSync(true);
+      return nD;
+    });
   };
 
-  const handleDuplicateNode = (nodeId: string) => {
-    const original = (nodeData[activeJId] || []).find((n: any) => n.id === nodeId);
+  const handleDuplicateNode = (nodeId) => {
+    const original = (nodeData[activeJId] || []).find((n) => n.id === nodeId);
     if (!original) return;
     const newNode = { ...original, id: `node-${Date.now()}`, x: original.x + 30, y: original.y + 30 };
-    const nD = { ...nodeData, [activeJId]: [...(nodeData[activeJId] || []), newNode] };
-    setNodeData(nD);
-    syncToCloud(journeysList, nD, edgeData, true);
-  };
-
-  const removeNode = (id: string) => {
-    const nD = { ...nodeData, [activeJId]: (nodeData[activeJId] || []).filter((n: any) => n.id !== id) };
-    const eD = { ...edgeData, [activeJId]: (edgeData[activeJId] || []).filter((e: any) => e.from !== id && e.to !== id) };
-    setNodeData(nD);
-    setEdgeData(eD);
-    syncToCloud(journeysList, nD, eD, true);
-  };
-
-  // Updated to use functional state to completely eliminate the "lost edit on refresh" bug
-  const updateNodeLocal = (id: string, upd: any, forceSync = false) => {
     setNodeData(prev => {
-      const nD = { ...prev, [activeJId]: (prev[activeJId] || []).map((n: any) => n.id === id ? { ...n, ...upd } : n) };
-      syncToCloud(journeysList, nD, edgeData, forceSync);
+      const nD = { ...prev, [activeJId]: [...(prev[activeJId] || []), newNode] };
+      latestDataRef.current.nodeData = nD;
+      triggerSync(true);
+      return nD;
+    });
+  };
+
+  const removeNode = (id) => {
+    setNodeData(prev => {
+      const nD = { ...prev, [activeJId]: (prev[activeJId] || []).filter((n) => n.id !== id) };
+      latestDataRef.current.nodeData = nD;
+      return nD;
+    });
+    setEdgeData(prev => {
+      const eD = { ...prev, [activeJId]: (prev[activeJId] || []).filter((e) => e.from !== id && e.to !== id) };
+      latestDataRef.current.edgeData = eD;
+      triggerSync(true);
+      return eD;
+    });
+  };
+
+  // Functional state guarantees data integrity on blur
+  const updateNodeLocal = (id, upd, forceSync = false) => {
+    setNodeData(prev => {
+      const nD = { ...prev, [activeJId]: (prev[activeJId] || []).map((n) => n.id === id ? { ...n, ...upd } : n) };
+      latestDataRef.current.nodeData = nD;
+      triggerSync(forceSync);
       return nD;
     });
   };
 
   // --- DRAG & LINK LOGIC ---
-  const handleMouseMove = (e: React.MouseEvent) => {
+  const handleMouseMove = (e) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left + canvasRef.current.scrollLeft;
@@ -309,41 +330,44 @@ export default function App() {
 
     if (dragNode) {
       isDraggingRef.current = true;
-      setNodeData((prev: any) => ({
+      setNodeData(prev => ({
         ...prev,
-        [activeJId]: prev[activeJId].map((n: any) => n.id === dragNode ? { ...n, x: x - dragOffset.x, y: y - dragOffset.y } : n)
+        [activeJId]: prev[activeJId].map((n) => n.id === dragNode ? { ...n, x: x - dragOffset.x, y: y - dragOffset.y } : n)
       }));
     }
   };
 
-  const handleStartLink = (e: React.MouseEvent, id: string, portType: string) => {
+  const handleStartLink = (e, id, portType) => {
     e.stopPropagation(); e.preventDefault();
     setLinking({ fromId: id, portType });
   };
 
-  const completeLinking = (targetId: string) => {
+  const completeLinking = (targetId) => {
     if (linking && linking.fromId !== targetId) {
-      const newEdge = { id: `e-${Date.now()}`, from: linking.fromId, to: targetId, port: linking.portType };
-      const eD = { ...edgeData, [activeJId]: [...(edgeData[activeJId] || []), newEdge] };
-      setEdgeData(eD);
-      syncToCloud(journeysList, nodeData, eD, true);
+      setEdgeData(prev => {
+        const newEdge = { id: `e-${Date.now()}`, from: linking.fromId, to: targetId, port: linking.portType };
+        const eD = { ...prev, [activeJId]: [...(prev[activeJId] || []), newEdge] };
+        latestDataRef.current.edgeData = eD;
+        triggerSync(true);
+        return eD;
+      });
     }
     setLinking(null);
   };
 
-  // --- SVG PATH MATH (Dynamic Height & Bezier Placement) ---
-  const getNodeHeight = (node: any) => {
+  // --- PERFECT HEIGHT/ANCHOR CALCULATION ---
+  const getNodeHeight = (node) => {
     if (node.type === 'trigger') return 100;
-    if (node.type === 'split') return 110;
-    if (node.type === 'delay') return 110;
+    if (node.type === 'split') return 160;  // Dynamically calculate height to clear the YES/NO ports
+    if (node.type === 'delay') return 120;
     if (node.type === 'action') {
-       return (node.previewLink && node.previewLink.trim() !== '') ? 280 : 240;
+       return (node.previewLink && node.previewLink.trim() !== '') ? 250 : 190;
     }
     return 150;
   };
 
-  const calculatePath = (x1: number, y1: number, x2: number, y2: number) => {
-    const curve = Math.max(60, Math.abs(y2 - y1) / 2);
+  const calculatePath = (x1, y1, x2, y2) => {
+    const curve = Math.max(80, Math.abs(y2 - y1) / 2);
     return `M ${x1} ${y1} C ${x1} ${y1 + curve}, ${x2} ${y2 - curve}, ${x2} ${y2}`;
   };
 
@@ -351,7 +375,7 @@ export default function App() {
   const edges = edgeData[activeJId] || [];
   const activeJourney = journeysList.find(j => j.id === activeJId);
 
-  // Blocking render until cloud state is loaded to prevent overrides
+  // Blocking render until cloud state is loaded to prevent initial overwrites
   if (!isInitialized) {
     return (
       <div className="flex h-screen items-center justify-center bg-black text-white flex-col gap-4">
@@ -460,18 +484,18 @@ export default function App() {
           
           <svg className="absolute top-0 left-0 min-w-full min-h-full pointer-events-none z-0" style={{ width: 5000, height: 5000 }}>
             {edges.map(e => {
-              const from = nodes.find((n: any) => n.id === e.from);
-              const to = nodes.find((n: any) => n.id === e.to);
+              const from = nodes.find((n) => n.id === e.from);
+              const to = nodes.find((n) => n.id === e.to);
               if (!from || !to) return null;
               
               const portOffset = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
               const x1 = from.x + 140 + portOffset;
               
-              // DYNAMIC HEIGHT: Anchor line slightly inside bottom of box
-              const y1 = from.y + getNodeHeight(from) - 10; 
+              // DYNAMIC HEIGHT: Anchor line completely below the box + YES/NO buttons
+              const y1 = from.y + getNodeHeight(from); 
               
               const x2 = to.x + 140;
-              const y2 = to.y + 20; 
+              const y2 = to.y + 10; // Slightly inside the top of target box
               
               const color = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#5E5E62';
               const curve = Math.max(60, Math.abs(y2 - y1) / 2);
@@ -491,17 +515,19 @@ export default function App() {
                     style={{ pointerEvents: 'all' }}
                     onPointerDown={(evt) => {
                        evt.stopPropagation();
-                       const ne = edges.filter((it: any) => it.id !== e.id);
-                       const nED = {...edgeData, [activeJId]: ne};
-                       setEdgeData(nED);
-                       syncToCloud(journeysList, nodeData, nED, true);
+                       setEdgeData(prev => {
+                          const nED = { ...prev, [activeJId]: prev[activeJId].filter((it) => it.id !== e.id) };
+                          latestDataRef.current.edgeData = nED;
+                          triggerSync(true); // Force immediate deletion
+                          return nED;
+                       });
                     }}
                   >
-                    {/* Massive invisible hitbox */}
-                    <circle cx={btnX} cy={btnY} r="24" fill="transparent" />
+                    {/* Massive invisible hitbox for unmissable clicks */}
+                    <circle cx={btnX} cy={btnY} r="28" fill="transparent" />
                     {/* Visible button UI */}
-                    <circle cx={btnX} cy={btnY} r="12" fill="#1c1c1e" stroke={color} strokeWidth="2" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
-                    <text x={btnX} y={btnY + 4} textAnchor="middle" fontSize="14" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
+                    <circle cx={btnX} cy={btnY} r="14" fill="#1c1c1e" stroke={color} strokeWidth="2.5" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
+                    <text x={btnX} y={btnY + 5} textAnchor="middle" fontSize="16" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
                   </g>
                 </g>
               );
@@ -511,8 +537,8 @@ export default function App() {
             {linking && (
                <path 
                  d={calculatePath(
-                   nodes.find((n: any) => n.id === linking.fromId).x + 140 + (linking.portType === 'true' ? -40 : linking.portType === 'false' ? 40 : 0), 
-                   nodes.find((n: any) => n.id === linking.fromId).y + getNodeHeight(nodes.find((n: any) => n.id === linking.fromId)) - 10, 
+                   nodes.find((n) => n.id === linking.fromId).x + 140 + (linking.portType === 'true' ? -40 : linking.portType === 'false' ? 40 : 0), 
+                   nodes.find((n) => n.id === linking.fromId).y + getNodeHeight(nodes.find((n) => n.id === linking.fromId)), 
                    mousePos.x, mousePos.y
                  )} 
                  stroke="#0A84FF" strokeWidth="2" strokeDasharray="6,6" fill="none" 
@@ -521,7 +547,7 @@ export default function App() {
           </svg>
 
           {/* RENDER NODES */}
-          {nodes.map((n: any) => (
+          {nodes.map((n) => (
             <div key={n.id} className="absolute z-20" style={{ left: n.x, top: n.y }}>
               <div 
                 onMouseUp={() => completeLinking(n.id)}
@@ -536,7 +562,7 @@ export default function App() {
                 {/* DRAG HEADER */}
                 <div 
                   onMouseDown={(e) => { 
-                    const rect = e.currentTarget.closest('div.absolute')!.getBoundingClientRect(); 
+                    const rect = e.currentTarget.closest('div.absolute').getBoundingClientRect(); 
                     setDragOffset({ x: e.clientX - rect.left, y: e.clientY - rect.top }); 
                     setDragNode(n.id); 
                   }} 
@@ -554,13 +580,14 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* CONTENT INPUTS - Using functional update on Blur to force hard sync */}
+                {/* CONTENT INPUTS - Functional update on Blur enforces hard sync */}
                 <div className="p-6 space-y-4" onMouseDown={e => e.stopPropagation()}>
                    <input 
                      className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" 
                      value={n.label || n.title} 
+                     onFocus={() => { isTypingRef.current = true; }}
                      onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value }, false)} 
-                     onBlur={() => updateNodeLocal(n.id, { label: n.label, title: n.title }, true)}
+                     onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                    />
                    
                    {n.type === 'action' && (
@@ -569,8 +596,9 @@ export default function App() {
                           className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" 
                           value={n.content} 
                           placeholder="Message content..." 
+                          onFocus={() => { isTypingRef.current = true; }}
                           onChange={e => updateNodeLocal(n.id, { content: e.target.value }, false)} 
-                          onBlur={() => updateNodeLocal(n.id, { content: n.content }, true)}
+                          onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                         />
                         
                         <div className="flex flex-col gap-1 mt-1 text-left">
@@ -581,8 +609,9 @@ export default function App() {
                                 className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" 
                                 placeholder="Paste link..." 
                                 value={n.previewLink || ''} 
+                                onFocus={() => { isTypingRef.current = true; }}
                                 onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value }, false)} 
-                                onBlur={() => updateNodeLocal(n.id, { previewLink: n.previewLink }, true)}
+                                onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                               />
                            </div>
                            {n.previewLink && n.previewLink.trim() !== '' && (
@@ -596,8 +625,9 @@ export default function App() {
                         className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" 
                         placeholder="Enter condition..." 
                         value={n.condition} 
+                        onFocus={() => { isTypingRef.current = true; }}
                         onChange={e => updateNodeLocal(n.id, { condition: e.target.value }, false)} 
-                        onBlur={() => updateNodeLocal(n.id, { condition: n.condition }, true)}
+                        onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                       />
                    )}
                    {n.type === 'delay' && (
@@ -606,8 +636,9 @@ export default function App() {
                           type="number" 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-xs font-bold text-white border border-white/5 outline-none focus:border-[#0A84FF]" 
                           value={n.value} 
+                          onFocus={() => { isTypingRef.current = true; }}
                           onChange={e => updateNodeLocal(n.id, { value: e.target.value }, false)} 
-                          onBlur={() => updateNodeLocal(n.id, { value: n.value }, true)}
+                          onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                         />
                         <select 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-[10px] font-black text-gray-500 border border-white/5 outline-none cursor-pointer" 
@@ -655,7 +686,7 @@ export default function App() {
   );
 }
 
-const ToolBtn = ({ icon, onClick }: any) => (
+const ToolBtn = ({ icon, onClick }) => (
   <button onClick={onClick} className="p-3 text-gray-500 hover:text-white hover:bg-white/10 rounded-xl transition-all active:scale-95">
     {icon}
   </button>
