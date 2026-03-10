@@ -1,10 +1,9 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { 
-  MessageSquare, Phone, Clock, Zap, Trash2, GitBranch, 
-  Smartphone, Plus, Check, X, Link as LinkIcon, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle, Loader2
+import {
+  MessageSquare, Phone, Clock, Zap, Trash2, GitBranch,
+  Smartphone, Plus, Check, X, Link as LinkIcon, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle, Loader2, Wifi, WifiOff
 } from 'lucide-react';
 
-// --- 1. FIREBASE CONNECTION ---
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, getDoc } from 'firebase/firestore';
@@ -23,36 +22,15 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
 const db = getFirestore(app);
+const APP_ID = 'cottonworld-unified-sync-final-v3';
+const LS_KEY = 'cw_cache_v4';
+const LS_TAB = 'cw_active_journey';
 
-const appId = 'cottonworld-unified-sync-final-v3';
+function docRef(sub) { return doc(db, 'artifacts', APP_ID, 'public', 'data', 'dashboardState', sub); }
+function loadCache() { try { const d = JSON.parse(localStorage.getItem(LS_KEY)); return d?.j ? d : null; } catch { return null; } }
+function saveCache(j, n, e) { try { localStorage.setItem(LS_KEY, JSON.stringify({ j, n, e, t: Date.now() })); } catch {} }
 
-// --- LOCAL STORAGE: CRASH-RECOVERY SAFETY NET ONLY ---
-const LS_KEY = 'cw_dashboard_cache_v3';
-const LS_ACTIVE_TAB = 'cw_active_journey';
-
-function loadCache() {
-  try {
-    const raw = localStorage.getItem(LS_KEY);
-    if (!raw) return null;
-    const p = JSON.parse(raw);
-    if (p && p.journeysList && p.nodeData && p.edgeData) return p;
-    return null;
-  } catch { return null; }
-}
-
-function saveCache(data) {
-  try {
-    localStorage.setItem(LS_KEY, JSON.stringify({
-      journeysList: data.journeysList,
-      nodeData: data.nodeData,
-      edgeData: data.edgeData,
-      t: Date.now()
-    }));
-  } catch {}
-}
-
-// --- 2. INITIAL DATA ---
-const INITIAL_JOURNEYS = [
+const INIT_J = [
   { id: 'j1', title: 'Cart Abandonment', desc: 'WhatsApp/RCS + Voice Bot escalation.' },
   { id: 'j2', title: 'COD Verification', desc: 'Automated RTO reduction.' },
   { id: 'j3', title: 'Welcome Series', desc: 'New subscriber onboarding.' },
@@ -60,733 +38,565 @@ const INITIAL_JOURNEYS = [
   { id: 'j5', title: 'Browse Abandonment', desc: 'Retargeting high-interest browsers.' },
   { id: 'j6', title: 'Win-back Campaign', desc: '90-day inactive segment recovery.' }
 ];
+const INIT_N = { 'j1': [
+  { id: 'n1', type: 'trigger', x: 250, y: 80, label: 'Checkout Abandoned' },
+  { id: 'n2', type: 'action', channel: 'WhatsApp', x: 250, y: 240, title: 'Main Nudge', content: 'Hi {{name}}, your cart is waiting!', previewLink: '' },
+  { id: 'n3', type: 'split', x: 250, y: 560, condition: 'Did customer click link?' }
+]};
+const INIT_E = { 'j1': [
+  { id: 'e1', from: 'n1', to: 'n2', port: 'default' },
+  { id: 'e2', from: 'n2', to: 'n3', port: 'default' }
+]};
 
-const INITIAL_NODES = {
-  'j1': [
-    { id: 'n1', type: 'trigger', x: 250, y: 80, label: 'Checkout Abandoned' },
-    { id: 'n2', type: 'action', channel: 'WhatsApp', x: 250, y: 240, title: 'Main Nudge', content: 'Hi {{name}}, your cart is waiting!', previewLink: '' },
-    { id: 'n3', type: 'split', x: 250, y: 560, condition: 'Did customer click link?' }
-  ]
-};
-
-const INITIAL_EDGES = {
-  'j1': [
-    { id: 'e1', from: 'n1', to: 'n2', port: 'default' },
-    { id: 'e2', from: 'n2', to: 'n3', port: 'default' }
-  ]
-};
-
-// Firestore doc helper
-function getDocRef(subPath) {
-  return doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', subPath);
-}
-
-// --- 3. MAIN APPLICATION ---
 export default function App() {
+  // --- AUTH & SYNC STATE ---
   const [user, setUser] = useState(null);
+  const [authError, setAuthError] = useState(null);
+  const [syncState, setSyncState] = useState('init'); // init | authing | ready | writing | synced | error | offline
+  const [syncError, setSyncError] = useState(null);
+  const [lastSyncTime, setLastSyncTime] = useState(null);
   const [isAdmin, setIsAdmin] = useState(false);
-  const [cloudStatus, setCloudStatus] = useState('CONNECTING...');
-  const [connectionError, setConnectionError] = useState(null);
-  const [debugLog, setDebugLog] = useState([]);
-  const [showDebug, setShowDebug] = useState(false);
-
-  // =============================================
-  // PERSISTENCE ARCHITECTURE:
-  // 
-  // PHASE 1 (instant): Load from localStorage cache so UI isn't blank
-  // PHASE 2 (1-3s):    Firebase connects → cloud data REPLACES local
-  //                     From this point, Firebase is the AUTHORITY
-  // ONGOING:           Every edit saves to BOTH Firebase + localStorage
-  //                     localStorage is just a crash-recovery net
-  // FAILOVER:          If Firebase never connects after 8s, localStorage
-  //                     data stays and user can still work offline
-  // =============================================
-
-  const cached = loadCache();
-  const [journeysList, setJourneysList] = useState(cached?.journeysList || INITIAL_JOURNEYS);
-  const [activeJId, setActiveJId] = useState(() => localStorage.getItem(LS_ACTIVE_TAB) || 'j1');
-  const [nodeData, setNodeData] = useState(cached?.nodeData || INITIAL_NODES);
-  const [edgeData, setEdgeData] = useState(cached?.edgeData || INITIAL_EDGES);
-
-  // Has Firebase delivered at least one snapshot? Once true, Firebase is authority.
-  const cloudHydrated = useRef(false);
-  // Is the user currently interacting? (prevents cloud from stomping mid-edit)
-  const isDraggingRef = useRef(false);
-  const isTypingRef = useRef(false);
-
-  const latestDataRef = useRef({
-    journeysList: cached?.journeysList || INITIAL_JOURNEYS,
-    nodeData: cached?.nodeData || INITIAL_NODES,
-    edgeData: cached?.edgeData || INITIAL_EDGES
-  });
-
-  const canvasRef = useRef(null);
-  const [dragNode, setDragNode] = useState(null);
-  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
-  const [linking, setLinking] = useState(null);
-  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
-
-  const debounceTimer = useRef(null);
-  const isSyncingRef = useRef(false);
-  const pendingSyncRef = useRef(false);
-  const lastLocalWriteTime = useRef(0);
-  const SNAPSHOT_GUARD_MS = 3000;
-
-  // --- UNSYNCED CHANGES TRACKER ---
-  // Ref for beforeunload (needs synchronous access), state for UI indicator
-  const unsyncedRef = useRef(false);
-  const [hasUnsyncedChanges, setHasUnsyncedChanges] = useState(false);
-  const markUnsynced = () => { unsyncedRef.current = true; setHasUnsyncedChanges(true); };
-  const markSynced = () => { unsyncedRef.current = false; setHasUnsyncedChanges(false); };
-
   const [showAuthInput, setShowAuthInput] = useState(false);
   const [authInput, setAuthInput] = useState('');
 
-  // --- LOGGER ---
-  const log = useCallback((msg) => {
-    const entry = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    console.log('[CW]', entry);
-    setDebugLog(prev => [...prev.slice(-50), entry]);
-  }, []);
+  // --- DATA ---
+  const cache = useRef(loadCache());
+  const [journeys, setJourneys] = useState(cache.current?.j || INIT_J);
+  const [nodes, setNodes] = useState(cache.current?.n || INIT_N);
+  const [edges, setEdges] = useState(cache.current?.e || INIT_E);
+  const [activeJId, setActiveJId] = useState(() => localStorage.getItem(LS_TAB) || 'j1');
 
-  // --- MIRROR REF + CACHE ON EVERY CHANGE ---
+  const latest = useRef({ j: journeys, n: nodes, e: edges });
+
+  // --- DRAG STATE (lightweight — only x,y update per frame, not entire node tree) ---
+  const canvasRef = useRef(null);
+  const [dragId, setDragId] = useState(null);
+  const [dragPos, setDragPos] = useState(null); // {x, y} — current mouse pos on canvas
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const isDraggingRef = useRef(false);
+
+  // --- LINKING ---
+  const [linking, setLinking] = useState(null);
+  const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+
+  // --- TYPING GUARD ---
+  const isTypingRef = useRef(false);
+
+  // --- SYNC ENGINE ---
+  const isSyncing = useRef(false);
+  const pendingSync = useRef(false);
+  const lastWriteTime = useRef(0);
+  const GUARD_MS = 2500;
+  const dirtyRef = useRef(false); // true = local changes not yet confirmed by Firebase
+
+  // Keep latest ref in sync
   useEffect(() => {
-    latestDataRef.current = { journeysList, nodeData, edgeData };
-    // Always keep localStorage in sync as a safety net
-    saveCache(latestDataRef.current);
-  }, [journeysList, nodeData, edgeData]);
+    latest.current = { j: journeys, n: nodes, e: edges };
+    saveCache(journeys, nodes, edges);
+  }, [journeys, nodes, edges]);
 
-  // =============================================
-  // FIREBASE WRITE ENGINE
-  // - Queues retries if a write is in progress
-  // - Stamps lastLocalWriteTime to guard against snapshot echo
-  // =============================================
+  useEffect(() => { localStorage.setItem(LS_TAB, activeJId); }, [activeJId]);
+
+  // --- FIREBASE WRITE ---
   const writeToFirebase = useCallback(async (data) => {
-    if (!user) { log('Write skipped: no auth user'); return; }
-    if (isSyncingRef.current) {
-      pendingSyncRef.current = true;
+    if (!user) {
+      setSyncState('error');
+      setSyncError('Not authenticated — cannot write to cloud');
       return;
     }
-    isSyncingRef.current = true;
+    if (isSyncing.current) { pendingSync.current = true; return; }
+    isSyncing.current = true;
+    setSyncState('writing');
     try {
-      lastLocalWriteTime.current = Date.now();
-      await setDoc(getDocRef('current'), {
-        journeysList: data.journeysList,
-        nodeData: data.nodeData,
-        edgeData: data.edgeData,
+      lastWriteTime.current = Date.now();
+      await setDoc(docRef('current'), {
+        journeysList: data.j, nodeData: data.n, edgeData: data.e,
         lastUpdated: new Date().toISOString()
       });
-      setCloudStatus('LIVE SYNC');
-      setConnectionError(null);
-      markSynced();
-      log('✓ Firebase write OK');
+      dirtyRef.current = false;
+      setSyncState('synced');
+      setSyncError(null);
+      setLastSyncTime(new Date());
     } catch (err) {
-      console.error('Firebase write error:', err);
-      const msg = err.code || err.message || 'unknown';
-      setCloudStatus('SYNC ERROR');
-      setConnectionError(`Write failed: ${msg}`);
-      log(`✗ Firebase write FAILED: ${msg}`);
-      // Retry on failure
-      pendingSyncRef.current = true;
+      console.error('Firebase write failed:', err);
+      setSyncState('error');
+      setSyncError(`Write failed: ${err.code || err.message}. Check Firestore rules allow writes.`);
+      pendingSync.current = true; // retry
     } finally {
-      isSyncingRef.current = false;
-      if (pendingSyncRef.current) {
-        pendingSyncRef.current = false;
-        setTimeout(() => writeToFirebase(latestDataRef.current), 200);
+      isSyncing.current = false;
+      if (pendingSync.current) {
+        pendingSync.current = false;
+        setTimeout(() => writeToFirebase(latest.current), 150);
       }
     }
-  }, [user, log]);
+  }, [user]);
 
+  const debounceRef = useRef(null);
   const triggerSync = useCallback((force = false) => {
-    // Always update the cache immediately
-    saveCache(latestDataRef.current);
-    if (!user) return; // Can't sync without auth — don't mark unsynced
-    // Mark as unsynced until Firebase confirms
-    markUnsynced();
+    saveCache(latest.current.j, latest.current.n, latest.current.e);
+    if (!user) return;
+    dirtyRef.current = true;
     if (force) {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      writeToFirebase(latestDataRef.current);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      writeToFirebase(latest.current);
     } else {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      debounceTimer.current = setTimeout(() => writeToFirebase(latestDataRef.current), 150);
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => writeToFirebase(latest.current), 150);
     }
   }, [user, writeToFirebase]);
 
   // --- AUTH ---
   useEffect(() => {
-    log(cached ? 'Cache loaded from localStorage (temporary until cloud arrives)' : 'No cache, using defaults');
+    setSyncState('authing');
     signInAnonymously(auth)
-      .then(() => log('✓ Anonymous auth success'))
+      .then(() => { setAuthError(null); })
       .catch((err) => {
-        log(`✗ Auth FAILED: ${err.code}`);
-        setCloudStatus('AUTH ERROR');
-        setConnectionError(`Auth failed: ${err.code}. Working offline from cache.`);
+        console.error('Auth failed:', err);
+        setAuthError(`${err.code}: ${err.message}`);
+        setSyncState('error');
+        setSyncError(`Authentication failed: ${err.code}. Enable Anonymous Auth in Firebase Console → Authentication → Sign-in method → Anonymous.`);
       });
-    const unsub = onAuthStateChanged(auth, (u) => {
+    return onAuthStateChanged(auth, (u) => {
       setUser(u);
-      if (u) log(`Auth ready: ${u.uid.substring(0,8)}...`);
+      if (u && !authError) setSyncState('ready');
     });
-    return () => unsub();
   }, []);
 
-  useEffect(() => { localStorage.setItem(LS_ACTIVE_TAB, activeJId); }, [activeJId]);
-
-  // =============================================
-  // FIREBASE SNAPSHOT LISTENER (THE AUTHORITY)
-  //
-  // Once Firebase delivers its first snapshot, cloud becomes
-  // the single source of truth. All remote edits from clients
-  // flow in through here.
-  //
-  // Guards:
-  //  1. hasPendingWrites → our own echo, skip
-  //  2. isTyping/isDragging → user mid-interaction, skip
-  //  3. lastLocalWriteTime → recently wrote, skip echo
-  // =============================================
+  // --- SNAPSHOT LISTENER ---
   useEffect(() => {
     if (!user) return;
-    log('Attaching snapshot listener...');
-    const docRef = getDocRef('current');
-
-    const unsub = onSnapshot(docRef, (snap) => {
+    const unsub = onSnapshot(docRef('current'), (snap) => {
       if (snap.exists()) {
-        const data = snap.data();
+        const d = snap.data();
         const isEcho = snap.metadata.hasPendingWrites;
         const isBusy = isDraggingRef.current || isTypingRef.current;
-        const isRecent = (Date.now() - lastLocalWriteTime.current) < SNAPSHOT_GUARD_MS;
-
-        if (isEcho) {
-          log('Snapshot: own echo, skip');
-        } else if (isBusy) {
-          log('Snapshot: user busy, skip');
-        } else if (isRecent) {
-          log('Snapshot: recent write guard, skip');
-        } else {
-          // CLOUD WINS: Apply remote state
-          const newState = {
-            journeysList: data.journeysList || INITIAL_JOURNEYS,
-            nodeData: data.nodeData || INITIAL_NODES,
-            edgeData: data.edgeData || INITIAL_EDGES
-          };
-          setJourneysList(newState.journeysList);
-          setNodeData(newState.nodeData);
-          setEdgeData(newState.edgeData);
-          latestDataRef.current = newState;
-          saveCache(newState);
-
-          if (!cloudHydrated.current) {
-            log('✓ FIRST SNAPSHOT: Cloud data is now the authority');
-            cloudHydrated.current = true;
-          } else {
-            log('✓ Snapshot: applied remote update');
-          }
+        const isRecent = (Date.now() - lastWriteTime.current) < GUARD_MS;
+        if (!isEcho && !isBusy && !isRecent) {
+          setJourneys(d.journeysList || INIT_J);
+          setNodes(d.nodeData || INIT_N);
+          setEdges(d.edgeData || INIT_E);
+          latest.current = { j: d.journeysList || INIT_J, n: d.nodeData || INIT_N, e: d.edgeData || INIT_E };
+          saveCache(latest.current.j, latest.current.n, latest.current.e);
         }
-        setCloudStatus('LIVE SYNC');
-        setConnectionError(null);
+        if (!dirtyRef.current) setSyncState('synced');
       } else {
-        // Cloud doc doesn't exist yet — push our current state up
-        log('Cloud doc empty → pushing local state as seed');
-        writeToFirebase(latestDataRef.current);
-        cloudHydrated.current = true;
+        writeToFirebase(latest.current);
       }
-    }, (error) => {
-      log(`✗ Snapshot ERROR: ${error.code || error.message}`);
-      setCloudStatus('OFFLINE');
-      setConnectionError(`Listener failed: ${error.code}. Working from cache.`);
+    }, (err) => {
+      console.error('Snapshot error:', err);
+      setSyncState('offline');
+      setSyncError(`Listener: ${err.code}. Check Firestore rules.`);
     });
-
-    return () => { log('Snapshot listener detached'); unsub(); };
-  }, [user, writeToFirebase, log]);
-
-  // --- SAVE ON UNLOAD / TAB SWITCH ---
-  useEffect(() => {
-    const handleBeforeUnload = (e) => {
-      if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      saveCache(latestDataRef.current);
-      
-      // BLOCK CLOSE/RELOAD if there are unsynced changes
-      if (unsyncedRef.current || isSyncingRef.current || pendingSyncRef.current || debounceTimer.current) {
-        // Trigger browser's native "unsaved changes" dialog
-        e.preventDefault();
-        e.returnValue = 'You have unsynced changes. Are you sure you want to leave?';
-        
-        // Also attempt a last-ditch Firebase push
-        if (user) {
-          try {
-            setDoc(getDocRef('current'), {
-              ...latestDataRef.current,
-              lastUpdated: new Date().toISOString()
-            }).then(() => {
-              markSynced();
-            }).catch(() => {});
-          } catch {}
-        }
-        
-        return e.returnValue;
-      }
-      
-      // If synced, allow close silently
-      if (user) {
-        try {
-          setDoc(getDocRef('current'), {
-            ...latestDataRef.current,
-            lastUpdated: new Date().toISOString()
-          }).catch(() => {});
-        } catch {}
-      }
-    };
-    const handleVisibility = () => {
-      if (document.visibilityState === 'hidden') {
-        if (debounceTimer.current) clearTimeout(debounceTimer.current);
-        saveCache(latestDataRef.current);
-        if (user) writeToFirebase(latestDataRef.current);
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-      document.removeEventListener('visibilitychange', handleVisibility);
-    };
+    return () => unsub();
   }, [user, writeToFirebase]);
 
-  // --- GLOBAL MOUSE-UP ---
+  // --- UNLOAD PROTECTION ---
+  useEffect(() => {
+    const onUnload = (e) => {
+      saveCache(latest.current.j, latest.current.n, latest.current.e);
+      if (dirtyRef.current || isSyncing.current) {
+        e.preventDefault();
+        e.returnValue = 'Changes not synced to cloud yet. Leave anyway?';
+        if (user) setDoc(docRef('current'), {
+          journeysList: latest.current.j, nodeData: latest.current.n, edgeData: latest.current.e,
+          lastUpdated: new Date().toISOString()
+        }).catch(() => {});
+        return e.returnValue;
+      }
+    };
+    const onVis = () => {
+      if (document.visibilityState === 'hidden') {
+        saveCache(latest.current.j, latest.current.n, latest.current.e);
+        if (user && dirtyRef.current) writeToFirebase(latest.current);
+      }
+    };
+    window.addEventListener('beforeunload', onUnload);
+    document.addEventListener('visibilitychange', onVis);
+    return () => { window.removeEventListener('beforeunload', onUnload); document.removeEventListener('visibilitychange', onVis); };
+  }, [user, writeToFirebase]);
+
+  // --- GLOBAL MOUSE UP ---
   useEffect(() => {
     const up = () => {
-      if (dragNode || linking) {
+      if (dragId) {
+        // Commit drag position to node data
+        if (dragPos) {
+          const finalX = dragPos.x - dragOffset.x;
+          const finalY = dragPos.y - dragOffset.y;
+          setNodes(prev => {
+            const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: finalX, y: finalY } : n) };
+            latest.current.n = nd;
+            return nd;
+          });
+          triggerSync(true);
+        }
         isDraggingRef.current = false;
-        if (dragNode) triggerSync(true);
       }
-      setDragNode(null);
+      setDragId(null);
+      setDragPos(null);
       setLinking(null);
     };
     window.addEventListener('mouseup', up);
     return () => window.removeEventListener('mouseup', up);
-  }, [dragNode, linking, triggerSync]);
+  }, [dragId, dragPos, dragOffset, activeJId, triggerSync]);
 
   // --- ADMIN ---
   const handleSaveMaster = async () => {
     if (!user || !isAdmin) return;
-    setCloudStatus('SAVING MASTER...');
     try {
-      await setDoc(getDocRef('master'), {
-        journeysList, nodeData, edgeData, lastUpdated: new Date().toISOString()
-      });
-      log('✓ Master template saved');
-      setCloudStatus('MASTER SAVED');
-      setTimeout(() => setCloudStatus('LIVE SYNC'), 2000);
-    } catch (e) {
-      log(`✗ Master save FAILED: ${e.message}`);
-      setCloudStatus('SYNC ERROR');
-    }
+      await setDoc(docRef('master'), { journeysList: journeys, nodeData: nodes, edgeData: edges, lastUpdated: new Date().toISOString() });
+      alert('Master template saved.');
+    } catch (e) { alert('Save failed: ' + e.message); }
   };
-
   const handleResetFlow = async () => {
-    if (!user || !isAdmin) return;
-    if (!window.confirm("Overwrite current flow with the Master Template?")) return;
-    setCloudStatus('RESTORING...');
+    if (!user || !isAdmin || !window.confirm('Overwrite current flow with Master?')) return;
     try {
-      const snap = await getDoc(getDocRef('master'));
-      const data = snap.exists() ? snap.data() : { journeysList: INITIAL_JOURNEYS, nodeData: INITIAL_NODES, edgeData: INITIAL_EDGES };
-      setJourneysList(data.journeysList);
-      setNodeData(data.nodeData);
-      setEdgeData(data.edgeData);
-      latestDataRef.current = { journeysList: data.journeysList, nodeData: data.nodeData, edgeData: data.edgeData };
-      saveCache(latestDataRef.current);
-      await writeToFirebase(latestDataRef.current);
-      log('✓ Flow reset from master');
-    } catch (e) {
-      log(`✗ Reset FAILED: ${e.message}`);
-      setCloudStatus('SYNC ERROR');
-    }
+      const snap = await getDoc(docRef('master'));
+      const d = snap.exists() ? snap.data() : { journeysList: INIT_J, nodeData: INIT_N, edgeData: INIT_E };
+      setJourneys(d.journeysList); setNodes(d.nodeData); setEdges(d.edgeData);
+      latest.current = { j: d.journeysList, n: d.nodeData, e: d.edgeData };
+      await writeToFirebase(latest.current);
+    } catch (e) { alert('Reset failed: ' + e.message); }
   };
 
   // --- JOURNEY CRUD ---
-  const handleDuplicateJourney = (id, e) => {
-    e.stopPropagation();
-    const j = journeysList.find(x => x.id === id);
+  const dupJourney = (id, ev) => {
+    ev.stopPropagation();
+    const j = journeys.find(x => x.id === id);
     if (!j) return;
-    const newId = `j-${Date.now()}`;
-    const newList = [...journeysList, { ...j, id: newId, title: `${j.title} (Copy)` }];
+    const nid = `j-${Date.now()}`;
     const idMap = {};
-    const newNodes = (nodeData[id] || []).map((n) => {
-      const nid = `node-${Date.now()}-${Math.random().toString(36).substring(2,6)}`;
-      idMap[n.id] = nid;
-      return { ...n, id: nid };
-    });
-    const newEdges = (edgeData[id] || []).map((edge) => ({
-      ...edge, id: `e-${Date.now()}-${Math.random().toString(36).substring(2,6)}`,
-      from: idMap[edge.from] || edge.from, to: idMap[edge.to] || edge.to
-    }));
-    setJourneysList(newList);
-    setNodeData(prev => ({ ...prev, [newId]: newNodes }));
-    setEdgeData(prev => ({ ...prev, [newId]: newEdges }));
-    latestDataRef.current = {
-      journeysList: newList,
-      nodeData: { ...nodeData, [newId]: newNodes },
-      edgeData: { ...edgeData, [newId]: newEdges }
-    };
-    setActiveJId(newId);
+    const nn = (nodes[id] || []).map(n => { const k = `nd-${Date.now()}-${Math.random().toString(36).slice(2,6)}`; idMap[n.id] = k; return { ...n, id: k }; });
+    const ne = (edges[id] || []).map(e => ({ ...e, id: `e-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, from: idMap[e.from] || e.from, to: idMap[e.to] || e.to }));
+    const newJ = [...journeys, { ...j, id: nid, title: j.title + ' (Copy)' }];
+    setJourneys(newJ); setNodes(p => ({ ...p, [nid]: nn })); setEdges(p => ({ ...p, [nid]: ne }));
+    latest.current = { j: newJ, n: { ...nodes, [nid]: nn }, e: { ...edges, [nid]: ne } };
+    setActiveJId(nid);
     triggerSync(true);
   };
-
-  const handleDeleteJourney = (id, e) => {
-    e.stopPropagation();
-    const nl = journeysList.filter(x => x.id !== id);
-    setJourneysList(nl);
-    latestDataRef.current.journeysList = nl;
-    if (activeJId === id && nl.length > 0) setActiveJId(nl[0].id);
+  const delJourney = (id, ev) => {
+    ev.stopPropagation();
+    const nl = journeys.filter(x => x.id !== id);
+    setJourneys(nl); latest.current.j = nl;
+    if (activeJId === id && nl.length) setActiveJId(nl[0].id);
     triggerSync(true);
   };
 
   // --- NODE CRUD ---
   const addNode = (type, chan = 'WhatsApp') => {
-    const id = `node-${Date.now()}`;
-    const newNode = {
-      id, type, x: 250, y: 150,
+    const id = `nd-${Date.now()}`;
+    const n = { id, type, x: 250, y: 150,
       ...(type === 'action' ? { channel: chan, title: `New ${chan}`, content: '', previewLink: '' } : {}),
       ...(type === 'delay' ? { value: 1, unit: 'Hours' } : {}),
       ...(type === 'split' ? { condition: '' } : {}),
       ...(type === 'trigger' ? { label: 'New Trigger' } : {})
     };
-    setNodeData(prev => {
-      const nD = { ...prev, [activeJId]: [...(prev[activeJId] || []), newNode] };
-      latestDataRef.current.nodeData = nD;
-      triggerSync(true);
-      return nD;
-    });
+    setNodes(prev => { const nd = { ...prev, [activeJId]: [...(prev[activeJId] || []), n] }; latest.current.n = nd; triggerSync(true); return nd; });
+  };
+  const dupNode = (nid) => {
+    const orig = (nodes[activeJId] || []).find(n => n.id === nid);
+    if (!orig) return;
+    const nn = { ...orig, id: `nd-${Date.now()}`, x: orig.x + 30, y: orig.y + 30 };
+    setNodes(prev => { const nd = { ...prev, [activeJId]: [...(prev[activeJId] || []), nn] }; latest.current.n = nd; triggerSync(true); return nd; });
+  };
+  const delNode = (id) => {
+    setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).filter(n => n.id !== id) }; latest.current.n = nd; return nd; });
+    setEdges(prev => { const ed = { ...prev, [activeJId]: (prev[activeJId] || []).filter(e => e.from !== id && e.to !== id) }; latest.current.e = ed; triggerSync(true); return ed; });
+  };
+  const updateNode = (id, upd, force = false) => {
+    setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === id ? { ...n, ...upd } : n) }; latest.current.n = nd; triggerSync(force); return nd; });
   };
 
-  const handleDuplicateNode = (nodeId) => {
-    const original = (nodeData[activeJId] || []).find(n => n.id === nodeId);
-    if (!original) return;
-    const nn = { ...original, id: `node-${Date.now()}`, x: original.x + 30, y: original.y + 30 };
-    setNodeData(prev => {
-      const nD = { ...prev, [activeJId]: [...(prev[activeJId] || []), nn] };
-      latestDataRef.current.nodeData = nD;
-      triggerSync(true);
-      return nD;
-    });
+  // --- LINKING ---
+  const startLink = (e, id, port) => { e.stopPropagation(); e.preventDefault(); setLinking({ fromId: id, port }); };
+  const endLink = (targetId) => {
+    if (linking && linking.fromId !== targetId) {
+      const ne = { id: `e-${Date.now()}`, from: linking.fromId, to: targetId, port: linking.port };
+      setEdges(prev => { const ed = { ...prev, [activeJId]: [...(prev[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; });
+    }
+    setLinking(null);
+  };
+  const delEdge = (eid) => {
+    setEdges(prev => { const ed = { ...prev, [activeJId]: (prev[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; });
   };
 
-  const removeNode = (id) => {
-    setNodeData(prev => {
-      const nD = { ...prev, [activeJId]: (prev[activeJId] || []).filter(n => n.id !== id) };
-      latestDataRef.current.nodeData = nD;
-      return nD;
-    });
-    setEdgeData(prev => {
-      const eD = { ...prev, [activeJId]: (prev[activeJId] || []).filter(e => e.from !== id && e.to !== id) };
-      latestDataRef.current.edgeData = eD;
-      triggerSync(true);
-      return eD;
-    });
-  };
-
-  const updateNodeLocal = (id, upd, forceSync = false) => {
-    setNodeData(prev => {
-      const nD = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === id ? { ...n, ...upd } : n) };
-      latestDataRef.current.nodeData = nD;
-      triggerSync(forceSync);
-      return nD;
-    });
-  };
-
-  // --- DRAG & LINK ---
-  const handleMouseMove = (e) => {
+  // --- CANVAS MOUSE ---
+  const onCanvasMove = (e) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left + canvasRef.current.scrollLeft;
     const y = e.clientY - rect.top + canvasRef.current.scrollTop;
     setMousePos({ x, y });
-    if (dragNode) {
+    if (dragId) {
       isDraggingRef.current = true;
-      setNodeData(prev => ({
-        ...prev,
-        [activeJId]: prev[activeJId].map(n => n.id === dragNode ? { ...n, x: x - dragOffset.x, y: y - dragOffset.y } : n)
-      }));
+      setDragPos({ x, y }); // Only update lightweight {x,y}, NOT the entire node tree
     }
   };
 
-  const handleStartLink = (e, id, portType) => {
-    e.stopPropagation(); e.preventDefault();
-    setLinking({ fromId: id, portType });
-  };
-
-  const completeLinking = (targetId) => {
-    if (linking && linking.fromId !== targetId) {
-      setEdgeData(prev => {
-        const ne = { id: `e-${Date.now()}`, from: linking.fromId, to: targetId, port: linking.portType };
-        const eD = { ...prev, [activeJId]: [...(prev[activeJId] || []), ne] };
-        latestDataRef.current.edgeData = eD;
-        triggerSync(true);
-        return eD;
-      });
+  // --- POSITION HELPER: returns visual position accounting for active drag ---
+  const getPos = useCallback((node) => {
+    if (dragId === node.id && dragPos) {
+      return { x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y };
     }
-    setLinking(null);
+    return { x: node.x, y: node.y };
+  }, [dragId, dragPos, dragOffset]);
+
+  // --- GEOMETRY ---
+  const getH = (n) => {
+    if (n.type === 'trigger') return 90;
+    if (n.type === 'split') return 140;
+    if (n.type === 'delay') return 110;
+    if (n.type === 'action') return (n.previewLink?.trim()) ? 240 : 180;
+    return 140;
+  };
+  const path = (x1, y1, x2, y2) => {
+    const c = Math.max(60, Math.abs(y2 - y1) / 2);
+    return `M${x1},${y1} C${x1},${y1 + c} ${x2},${y2 - c} ${x2},${y2}`;
   };
 
-  const getNodeHeight = (node) => {
-    if (node.type === 'trigger') return 100;
-    if (node.type === 'split') return 160;
-    if (node.type === 'delay') return 120;
-    if (node.type === 'action') return (node.previewLink && node.previewLink.trim() !== '') ? 250 : 190;
-    return 150;
-  };
+  const curNodes = nodes[activeJId] || [];
+  const curEdges = edges[activeJId] || [];
+  const activeJ = journeys.find(j => j.id === activeJId);
 
-  const calculatePath = (x1, y1, x2, y2) => {
-    const curve = Math.max(80, Math.abs(y2 - y1) / 2);
-    return `M ${x1} ${y1} C ${x1} ${y1 + curve}, ${x2} ${y2 - curve}, ${x2} ${y2}`;
-  };
-
-  const nodes = nodeData[activeJId] || [];
-  const edges = edgeData[activeJId] || [];
-  const activeJourney = journeysList.find(j => j.id === activeJId);
+  // --- SYNC STATUS ---
+  const syncColor = { init: '#666', authing: '#F59E0B', ready: '#F59E0B', writing: '#F59E0B', synced: '#22C55E', error: '#EF4444', offline: '#EF4444' }[syncState];
+  const syncLabel = { init: 'Starting...', authing: 'Authenticating...', ready: 'Connected', writing: 'Saving...', synced: 'Synced', error: 'Error', offline: 'Offline' }[syncState];
+  const isPulsing = syncState === 'writing' || syncState === 'authing';
 
   return (
-    <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden select-none" onMouseMove={handleMouseMove}>
-      {/* --- SIDEBAR --- */}
-      <aside className="w-64 bg-[#161616] border-r border-white/[0.04] flex flex-col shrink-0 z-50">
-        <div className="p-6 pb-4 border-b border-white/[0.04] flex flex-col gap-2">
-          <div className="flex justify-between items-center">
-            <h2 className="font-semibold uppercase tracking-tight text-white/80 text-sm leading-none">Cottonworld</h2>
-            <button onClick={() => addNode('trigger')} className="p-1 hover:bg-white/10 rounded-full transition-colors"><Plus size={16} /></button>
+    <div className="flex h-screen bg-[#0B0B0B] text-gray-100 font-sans overflow-hidden select-none" onMouseMove={onCanvasMove}>
+
+      {/* SIDEBAR */}
+      <aside className="w-60 bg-[#111] border-r border-white/[0.05] flex flex-col shrink-0 z-50">
+        <div className="px-5 pt-5 pb-3 border-b border-white/[0.05]">
+          <div className="flex justify-between items-center mb-2">
+            <span className="text-[11px] font-semibold uppercase tracking-widest text-white/60">Cottonworld</span>
+            <button onClick={() => addNode('trigger')} className="p-0.5 text-gray-600 hover:text-white transition-colors"><Plus size={14} /></button>
           </div>
-          <div className="flex items-center gap-2 cursor-pointer" onClick={() => setShowDebug(p => !p)} title="Toggle debug log">
-            <div className={`w-1.5 h-1.5 rounded-full ${
-              hasUnsyncedChanges ? 'bg-orange-500 animate-pulse' 
-              : cloudStatus.includes('LIVE') ? 'bg-emerald-500 animate-pulse' 
-              : cloudStatus.includes('ERROR') || cloudStatus === 'OFFLINE' ? 'bg-red-500 animate-pulse' 
-              : 'bg-amber-500 animate-pulse'
-            }`} />
-            <span className="text-[9px] font-bold uppercase tracking-widest text-gray-500">
-              {hasUnsyncedChanges ? 'SAVING...' : cloudStatus}
-            </span>
+
+          {/* SYNC STATUS */}
+          <div className="flex items-center gap-2">
+            <div className={`w-1.5 h-1.5 rounded-full`} style={{ backgroundColor: syncColor, animation: isPulsing ? 'pulse 1.5s infinite' : 'none' }} />
+            <span className="text-[9px] font-medium uppercase tracking-wider text-gray-600">{syncLabel}</span>
+            {lastSyncTime && syncState === 'synced' && (
+              <span className="text-[8px] text-gray-700 ml-auto">{lastSyncTime.toLocaleTimeString()}</span>
+            )}
           </div>
+
+          {/* ERROR DISPLAY — IMPOSSIBLE TO MISS */}
+          {(syncError || authError) && (
+            <div className="mt-2 p-2 bg-red-500/10 border border-red-500/20 rounded-lg">
+              <p className="text-[9px] text-red-400 font-medium leading-relaxed">{syncError || authError}</p>
+              {user && <button onClick={() => { setSyncError(null); writeToFirebase(latest.current); }} className="mt-1 text-[8px] text-red-300 underline">Retry Now</button>}
+            </div>
+          )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 space-y-1 custom-scrollbar">
-          {journeysList.map((j) => (
-            <div key={j.id} onClick={() => setActiveJId(j.id)} className={`w-full text-left px-3 py-2 rounded-lg text-[11px] font-medium transition-all flex items-center justify-between group cursor-pointer ${activeJId === j.id ? 'bg-white/[0.08] text-white' : 'text-gray-600 hover:text-gray-400 hover:bg-white/[0.03]'}`}>
-              <span className="truncate flex-1 uppercase tracking-tight">{j.title}</span>
+        {/* JOURNEY LIST */}
+        <div className="flex-1 overflow-y-auto p-3 space-y-0.5" style={{ scrollbarWidth: 'thin', scrollbarColor: '#333 transparent' }}>
+          {journeys.map(j => (
+            <div key={j.id} onClick={() => setActiveJId(j.id)}
+              className={`w-full text-left px-3 py-2 rounded-lg text-[11px] font-medium transition-all flex items-center justify-between group cursor-pointer ${
+                activeJId === j.id ? 'bg-white/[0.07] text-white' : 'text-gray-600 hover:text-gray-400 hover:bg-white/[0.03]'
+              }`}>
+              <span className="truncate flex-1">{j.title}</span>
               <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={(e) => handleDuplicateJourney(j.id, e)} className="p-1 text-white/40 hover:text-white" title="Duplicate"><Copy size={11}/></button>
-                <button onClick={(e) => handleDeleteJourney(j.id, e)} className="p-1 text-white/40 hover:text-red-500" title="Delete"><Trash2 size={11}/></button>
+                <button onClick={e => dupJourney(j.id, e)} className="p-0.5 text-white/30 hover:text-white"><Copy size={10}/></button>
+                <button onClick={e => delJourney(j.id, e)} className="p-0.5 text-white/30 hover:text-red-400"><Trash2 size={10}/></button>
               </div>
             </div>
           ))}
         </div>
 
         {/* ADMIN */}
-        <div className="p-4 border-t border-white/[0.04] bg-[#131313]">
+        <div className="p-3 border-t border-white/[0.05]">
           {showAuthInput && !isAdmin && (
-            <div className="mb-3 flex gap-2">
-              <input type="password" placeholder="Passcode..." className="flex-1 bg-black border border-white/10 rounded-lg px-3 py-2 text-[11px] text-white outline-none focus:border-[#0A84FF]" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === 'admin2024' && (setIsAdmin(true), setShowAuthInput(false))} />
-              <button onClick={() => { if (authInput === 'admin2024') { setIsAdmin(true); setShowAuthInput(false); }}} className="bg-[#0A84FF] px-3 py-2 rounded-lg text-[10px] font-bold text-white shadow-lg hover:bg-blue-600">GO</button>
+            <div className="mb-2 flex gap-1.5">
+              <input type="password" placeholder="Passcode" className="flex-1 bg-black border border-white/10 rounded px-2 py-1.5 text-[10px] text-white outline-none focus:border-white/20" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === 'admin2024' && (setIsAdmin(true), setShowAuthInput(false))} />
+              <button onClick={() => { if (authInput === 'admin2024') { setIsAdmin(true); setShowAuthInput(false); }}} className="bg-white/10 px-2 py-1.5 rounded text-[9px] font-medium text-white hover:bg-white/20">Go</button>
             </div>
           )}
-          <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 text-[9px] font-bold uppercase tracking-widest text-gray-500 hover:text-white transition-all">
-            {isAdmin ? <Unlock size={14}/> : <Lock size={14}/>} {isAdmin ? 'ADMIN UNLOCKED' : 'ADMIN LOGIN'}
+          <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-white/[0.03] text-[9px] font-medium text-gray-600 hover:text-white transition-all">
+            {isAdmin ? <Unlock size={12}/> : <Lock size={12}/>} {isAdmin ? 'Admin' : 'Admin Login'}
           </button>
           {isAdmin && (
-            <div className="flex gap-2 mt-3">
-              <button onClick={handleSaveMaster} className="flex-1 py-2 rounded-xl bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600 hover:text-white text-[9px] font-bold uppercase tracking-widest border border-emerald-500/20 transition-all flex items-center justify-center gap-1.5"><Save size={12}/> Save Master</button>
-              <button onClick={handleResetFlow} className="flex-1 py-2 rounded-xl bg-rose-600/20 text-rose-400 hover:bg-rose-600 hover:text-white text-[9px] font-bold uppercase tracking-widest border border-rose-500/20 transition-all flex items-center justify-center gap-1.5"><RefreshCw size={12}/> Reset Flow</button>
+            <div className="flex gap-1.5 mt-2">
+              <button onClick={handleSaveMaster} className="flex-1 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 text-[9px] font-medium flex items-center justify-center gap-1"><Save size={10}/> Save Master</button>
+              <button onClick={handleResetFlow} className="flex-1 py-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[9px] font-medium flex items-center justify-center gap-1"><RefreshCw size={10}/> Reset</button>
             </div>
           )}
         </div>
       </aside>
 
-      {/* --- CANVAS --- */}
-      <main className="flex-1 relative overflow-hidden bg-[#0a0a0a]" ref={canvasRef}>
-        {connectionError && (
-          <div className="absolute top-24 left-1/2 -translate-x-1/2 z-[100] bg-[#1a1a1a] border border-amber-500/20 backdrop-blur-xl p-3 rounded-xl flex items-center gap-2.5 shadow-lg max-w-md">
-            <AlertTriangle className="text-amber-500/70 shrink-0" size={16} />
-            <div>
-              <p className="text-[9px] font-medium text-gray-400 leading-relaxed">{connectionError}</p>
-              <p className="text-[8px] text-gray-600 mt-0.5">Edits cached locally.</p>
-            </div>
-          </div>
-        )}
-
-        {/* DEBUG LOG */}
-        {showDebug && (
-          <div className="absolute bottom-4 left-4 z-[100] bg-black/95 border border-white/10 rounded-2xl p-4 w-[420px] max-h-72 overflow-y-auto custom-scrollbar shadow-2xl">
-            <div className="flex justify-between items-center mb-2">
-              <span className="text-[9px] font-black uppercase tracking-widest text-gray-500">Sync Debug Log</span>
-              <button onClick={() => setShowDebug(false)} className="text-gray-600 hover:text-white"><X size={12}/></button>
-            </div>
-            {debugLog.length === 0 && <p className="text-[10px] text-gray-600 italic">Waiting for events...</p>}
-            {debugLog.map((entry, i) => (
-              <p key={i} className={`text-[9px] font-mono leading-relaxed ${entry.includes('✗') || entry.includes('FAILED') || entry.includes('ERROR') ? 'text-red-400' : entry.includes('✓') ? 'text-emerald-400' : 'text-gray-500'}`}>{entry}</p>
-            ))}
-          </div>
-        )}
-
-        <header className="absolute top-0 left-0 right-0 p-8 flex justify-between items-start z-40 pointer-events-none">
+      {/* CANVAS */}
+      <main className="flex-1 relative overflow-hidden bg-[#0B0B0B]" ref={canvasRef}>
+        {/* HEADER */}
+        <header className="absolute top-0 left-0 right-0 px-8 pt-6 pb-4 flex justify-between items-start z-40 pointer-events-none">
           <div className="pointer-events-auto">
-            <h1 className="text-3xl font-bold uppercase tracking-tight text-white/90 leading-none">{activeJourney?.title}</h1>
-            <p className="text-gray-600 mt-1.5 text-xs font-medium">{activeJourney?.desc}</p>
+            <h1 className="text-2xl font-semibold text-white/90 tracking-tight">{activeJ?.title}</h1>
+            <p className="text-gray-600 mt-0.5 text-xs">{activeJ?.desc}</p>
           </div>
-          <div className="flex gap-1 pointer-events-auto bg-[#1c1c1e]/80 backdrop-blur-xl p-1.5 rounded-xl border border-white/[0.06] shadow-lg">
-            <ToolBtn icon={<Zap size={14}/>} onClick={() => addNode('trigger')} />
-            <ToolBtn icon={<MessageSquare size={14}/>} onClick={() => addNode('action', 'WhatsApp')} />
-            <ToolBtn icon={<Phone size={14}/>} onClick={() => addNode('action', 'Voice Bot')} />
-            <ToolBtn icon={<Smartphone size={14}/>} onClick={() => addNode('action', 'SMS')} />
-            <ToolBtn icon={<Clock size={14}/>} onClick={() => addNode('delay')} />
-            <ToolBtn icon={<GitBranch size={14}/>} onClick={() => addNode('split')} />
+          <div className="flex gap-0.5 pointer-events-auto bg-[#161616] p-1 rounded-lg border border-white/[0.05]">
+            <TB icon={<Zap size={13}/>} onClick={() => addNode('trigger')} />
+            <TB icon={<MessageSquare size={13}/>} onClick={() => addNode('action', 'WhatsApp')} />
+            <TB icon={<Phone size={13}/>} onClick={() => addNode('action', 'Voice Bot')} />
+            <TB icon={<Smartphone size={13}/>} onClick={() => addNode('action', 'SMS')} />
+            <TB icon={<Clock size={13}/>} onClick={() => addNode('delay')} />
+            <TB icon={<GitBranch size={13}/>} onClick={() => addNode('split')} />
           </div>
         </header>
 
-        <div className="w-full h-full relative overflow-auto custom-scrollbar" style={{ backgroundImage: 'radial-gradient(#191919 1px, transparent 1px)', backgroundSize: '48px 48px' }}>
-          <svg className="absolute top-0 left-0 min-w-full min-h-full pointer-events-none z-0" style={{ width: 5000, height: 5000 }}>
-            {edges.map(e => {
-              const from = nodes.find(n => n.id === e.from);
-              const to = nodes.find(n => n.id === e.to);
-              if (!from || !to) return null;
-              const portOffset = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
-              const x1 = from.x + 140 + portOffset;
-              const y1 = from.y + getNodeHeight(from);
-              const x2 = to.x + 140;
-              const y2 = to.y + 10;
-              const color = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#444';
-              const curve = Math.max(60, Math.abs(y2 - y1) / 2);
+        {/* GRID */}
+        <div className="w-full h-full relative overflow-auto" style={{ backgroundImage: 'radial-gradient(#181818 1px, transparent 1px)', backgroundSize: '40px 40px', scrollbarWidth: 'thin', scrollbarColor: '#222 transparent' }}>
 
-              // Place × at TRUE midpoint (t=0.50) — always in the clear gap between boxes
-              const t = 0.50, u = 1 - t;
-              const cp1y = y1 + curve, cp2y = y2 - curve;
-              const btnX = (u*u*u)*x1 + 3*(u*u)*t*x1 + 3*u*(t*t)*x2 + (t*t*t)*x2;
-              const btnY = (u*u*u)*y1 + 3*(u*u)*t*cp1y + 3*u*(t*t)*cp2y + (t*t*t)*y2;
+          {/* SVG EDGES */}
+          <svg className="absolute inset-0 pointer-events-none z-0" style={{ width: 5000, height: 5000 }}>
+            {curEdges.map(e => {
+              const fromNode = curNodes.find(n => n.id === e.from);
+              const toNode = curNodes.find(n => n.id === e.to);
+              if (!fromNode || !toNode) return null;
+
+              const fp = getPos(fromNode);
+              const tp = getPos(toNode);
+
+              const off = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
+              const x1 = fp.x + 140 + off, y1 = fp.y + getH(fromNode);
+              const x2 = tp.x + 140, y2 = tp.y + 8;
+              const col = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#333';
+
+              // Midpoint for × button
+              const c = Math.max(60, Math.abs(y2 - y1) / 2);
+              const mx = (x1 + x2) / 2;
+              const my = (y1 + y2) / 2 + (c * 0.15); // slight downward nudge from geometric center
 
               return (
                 <g key={e.id} className="group">
-                  <path d={calculatePath(x1, y1, x2, y2)} stroke={color} strokeWidth="2" fill="none" opacity="0.3" className="group-hover:opacity-60 transition-all" />
-                  {/* Thick invisible hitbox over the line for easy hover */}
-                  <path d={calculatePath(x1, y1, x2, y2)} stroke="transparent" strokeWidth="20" fill="none" className="pointer-events-auto" />
-                  {/* × button — only appears on line hover */}
-                  <g 
-                    className="pointer-events-auto cursor-pointer opacity-0 group-hover:opacity-100 transition-all" 
-                    style={{ pointerEvents: 'all' }}
-                    onPointerDown={(evt) => {
-                      evt.stopPropagation();
-                      setEdgeData(prev => {
-                        const nED = { ...prev, [activeJId]: prev[activeJId].filter(it => it.id !== e.id) };
-                        latestDataRef.current.edgeData = nED;
-                        triggerSync(true);
-                        return nED;
-                      });
-                    }}
-                  >
-                    <circle cx={btnX} cy={btnY} r="24" fill="transparent" />
-                    <circle cx={btnX} cy={btnY} r="11" fill="#1c1c1e" stroke="#555" strokeWidth="1.5" className="hover:stroke-red-500 transition-all" />
-                    <text x={btnX} y={btnY + 4} textAnchor="middle" fontSize="13" fill="#666" className="pointer-events-none hover:fill-red-500">×</text>
+                  <path d={path(x1, y1, x2, y2)} stroke={col} strokeWidth="1.5" fill="none" opacity="0.25" className="group-hover:opacity-50 transition-all duration-150" />
+                  <path d={path(x1, y1, x2, y2)} stroke="transparent" strokeWidth="18" fill="none" className="pointer-events-auto cursor-pointer" />
+                  <g className="pointer-events-auto cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+                    onPointerDown={ev => { ev.stopPropagation(); delEdge(e.id); }}>
+                    <circle cx={mx} cy={my} r="20" fill="transparent" />
+                    <circle cx={mx} cy={my} r="9" fill="#111" stroke="#444" strokeWidth="1" className="hover:stroke-red-500 transition-colors" />
+                    <text x={mx} y={my + 3.5} textAnchor="middle" fontSize="11" fill="#666" className="pointer-events-none">×</text>
                   </g>
                 </g>
               );
             })}
             {linking && (() => {
-              const fn = nodes.find(n => n.id === linking.fromId);
+              const fn = curNodes.find(n => n.id === linking.fromId);
               if (!fn) return null;
-              return <path d={calculatePath(fn.x + 140 + (linking.portType === 'true' ? -40 : linking.portType === 'false' ? 40 : 0), fn.y + getNodeHeight(fn), mousePos.x, mousePos.y)} stroke="#0A84FF" strokeWidth="1.5" strokeDasharray="4,4" fill="none" opacity="0.5" />;
+              const fp = getPos(fn);
+              const off = linking.port === 'true' ? -40 : linking.port === 'false' ? 40 : 0;
+              return <path d={path(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#0A84FF" strokeWidth="1.5" strokeDasharray="4,4" fill="none" opacity="0.4" />;
             })()}
           </svg>
 
-          {nodes.map((n) => (
-            <div key={n.id} className="absolute z-20" style={{ left: n.x, top: n.y }}>
-              <div onMouseUp={() => completeLinking(n.id)} className={`w-[280px] bg-[#1c1c1e]/90 backdrop-blur-2xl rounded-2xl border transition-all duration-200 ${
-                dragNode === n.id ? 'border-white/15 shadow-lg shadow-black/50 z-50'
-                : linking && linking.fromId !== n.id ? 'border-[#0A84FF]/40 shadow-md shadow-blue-500/10 cursor-crosshair z-40'
-                : 'border-white/[0.04] shadow-md shadow-black/30 hover:border-white/10 z-20'
-              }`}>
-                <div onMouseDown={(e) => { const rect = e.currentTarget.closest('div.absolute').getBoundingClientRect(); setDragOffset({ x: e.clientX - rect.left, y: e.clientY - rect.top }); setDragNode(n.id); }} className="px-5 py-2 border-b border-white/[0.04] flex justify-between items-center cursor-grab active:cursor-grabbing rounded-t-2xl">
-                  <span className="text-[9px] font-black uppercase tracking-widest text-gray-500 opacity-60 italic">{n.channel || n.type}</span>
-                  <div className="flex gap-1 items-center" onMouseDown={e => e.stopPropagation()}>
-                    <button onClick={() => handleDuplicateNode(n.id)} className="p-1 text-gray-600 hover:text-white transition-colors" title="Copy"><Copy size={11}/></button>
-                    <button className="p-1 text-gray-600 hover:text-red-500" onClick={() => removeNode(n.id)}><Trash2 size={11} /></button>
+          {/* NODES */}
+          {curNodes.map(n => {
+            const pos = getPos(n);
+            return (
+              <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}>
+                <div onMouseUp={() => endLink(n.id)}
+                  className={`w-[280px] bg-[#151515] rounded-xl border transition-colors duration-150 ${
+                    dragId === n.id ? 'border-white/10 z-50' : linking && linking.fromId !== n.id ? 'border-blue-500/30 z-40' : 'border-white/[0.04] hover:border-white/[0.08] z-20'
+                  }`}
+                  style={{ boxShadow: '0 2px 20px rgba(0,0,0,0.4)' }}>
+
+                  {/* HEADER */}
+                  <div onMouseDown={e => {
+                    const rect = e.currentTarget.closest('div.absolute').getBoundingClientRect();
+                    setDragOffset({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+                    setDragId(n.id);
+                  }} className="px-4 py-2 border-b border-white/[0.04] flex justify-between items-center cursor-grab active:cursor-grabbing rounded-t-xl">
+                    <span className="text-[9px] font-medium uppercase tracking-wider text-gray-600">{n.channel || n.type}</span>
+                    <div className="flex gap-1" onMouseDown={e => e.stopPropagation()}>
+                      <button onClick={() => dupNode(n.id)} className="p-0.5 text-gray-700 hover:text-white transition-colors"><Copy size={10}/></button>
+                      <button onClick={() => delNode(n.id)} className="p-0.5 text-gray-700 hover:text-red-400 transition-colors"><Trash2 size={10}/></button>
+                    </div>
                   </div>
-                </div>
-                <div className="p-5 space-y-3" onMouseDown={e => e.stopPropagation()}>
-                  <input className="bg-transparent text-base font-semibold outline-none w-full border-b border-transparent focus:border-white/[0.06] text-white/90 pb-1" value={n.label || n.title || ''}
-                    onFocus={() => { isTypingRef.current = true; }}
-                    onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value }, false)}
-                    onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
-                  />
-                  {n.type === 'action' && (
-                    <>
-                      <textarea className="w-full bg-white/[0.03] p-3 rounded-xl text-[11px] h-16 outline-none resize-none leading-relaxed text-gray-500 border border-white/[0.04] focus:border-white/[0.08] transition-all" value={n.content || ''} placeholder="Message content..."
-                        onFocus={() => { isTypingRef.current = true; }}
-                        onChange={e => updateNodeLocal(n.id, { content: e.target.value }, false)}
-                        onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
-                      />
-                      <div className="flex flex-col gap-1 mt-1 text-left">
-                        <span className="text-[8px] font-medium uppercase tracking-widest text-gray-700">Preview / Media URL</span>
-                        <div className="flex items-center bg-white/[0.03] border border-white/[0.04] rounded-lg overflow-hidden focus-within:border-white/[0.08] transition-colors">
-                          <div className="pl-2 text-gray-600"><LinkIcon size={10} /></div>
-                          <input className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" placeholder="Paste link..." value={n.previewLink || ''}
-                            onFocus={() => { isTypingRef.current = true; }}
-                            onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value }, false)}
-                            onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
-                          />
-                        </div>
-                        {n.previewLink && n.previewLink.trim() !== '' && (
-                          <a href={n.previewLink.startsWith('http') ? n.previewLink : `https://${n.previewLink}`} target="_blank" rel="noopener noreferrer" className="mt-1 w-full bg-white/[0.06] hover:bg-white/[0.1] text-gray-400 hover:text-white py-1.5 rounded-lg text-[9px] font-medium uppercase flex items-center justify-center gap-1 transition-all">Preview ↗</a>
-                        )}
-                      </div>
-                    </>
-                  )}
-                  {n.type === 'split' && (
-                    <input className="w-full bg-white/[0.03] p-2 rounded-lg text-[10px] text-gray-500 outline-none border border-white/[0.04] focus:border-white/[0.08]" placeholder="Enter condition..." value={n.condition || ''}
+
+                  {/* BODY */}
+                  <div className="p-4 space-y-3" onMouseDown={e => e.stopPropagation()}>
+                    <input className="bg-transparent text-sm font-medium outline-none w-full text-white/90 placeholder-gray-700" value={n.label || n.title || ''}
                       onFocus={() => { isTypingRef.current = true; }}
-                      onChange={e => updateNodeLocal(n.id, { condition: e.target.value }, false)}
+                      onChange={e => updateNode(n.id, { label: e.target.value, title: e.target.value })}
                       onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
                     />
-                  )}
-                  {n.type === 'delay' && (
-                    <div className="flex gap-2">
-                      <input type="number" className="w-1/2 bg-white/[0.03] p-2 rounded-lg text-xs font-medium text-white border border-white/[0.04] outline-none focus:border-white/[0.08]" value={n.value || ''}
-                        onFocus={() => { isTypingRef.current = true; }}
-                        onChange={e => updateNodeLocal(n.id, { value: e.target.value }, false)}
-                        onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
-                      />
-                      <select className="w-1/2 bg-white/[0.03] p-2 rounded-lg text-[10px] font-medium text-gray-500 border border-white/[0.04] outline-none cursor-pointer" value={n.unit || 'Hours'}
-                        onChange={e => updateNodeLocal(n.id, { unit: e.target.value }, true)}>
-                        <option>Minutes</option><option>Hours</option><option>Days</option>
-                      </select>
-                    </div>
-                  )}
-                </div>
-                <div className="absolute -bottom-2.5 left-0 w-full flex justify-center z-30 pointer-events-none">
-                  <div className="pointer-events-auto relative group flex items-center justify-center bg-[#222] border border-white/[0.06] rounded-full shadow-sm h-5 hover:h-6 hover:px-0.5 transition-all cursor-pointer">
-                    {n.type === 'split' ? (
+                    {n.type === 'action' && (
                       <>
-                        <div className="w-6 h-full flex items-center justify-center text-gray-400 group-hover:hidden"><Plus size={14} strokeWidth={2.5} /></div>
-                        <div className="hidden group-hover:flex gap-1">
-                          <button onMouseDown={(e) => handleStartLink(e, n.id, 'true')} className="w-5 h-5 rounded-full bg-[#32D74B]/20 text-[#32D74B] hover:bg-[#32D74B] hover:text-white flex items-center justify-center transition-all" title="True"><Check size={12} strokeWidth={3} /></button>
-                          <button onMouseDown={(e) => handleStartLink(e, n.id, 'false')} className="w-5 h-5 rounded-full bg-[#FF453A]/20 text-[#FF453A] hover:bg-[#FF453A] hover:text-white flex items-center justify-center transition-all" title="False"><X size={12} strokeWidth={3} /></button>
+                        <textarea className="w-full bg-white/[0.03] p-2.5 rounded-lg text-[11px] h-14 outline-none resize-none text-gray-500 border border-white/[0.04] focus:border-white/[0.08] transition-colors" value={n.content || ''} placeholder="Message content..."
+                          onFocus={() => { isTypingRef.current = true; }}
+                          onChange={e => updateNode(n.id, { content: e.target.value })}
+                          onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
+                        />
+                        <div>
+                          <div className="text-[8px] font-medium uppercase tracking-wider text-gray-700 mb-1">Preview URL</div>
+                          <div className="flex items-center bg-white/[0.03] border border-white/[0.04] rounded-lg overflow-hidden focus-within:border-white/[0.08] transition-colors">
+                            <div className="pl-2 text-gray-700"><LinkIcon size={9}/></div>
+                            <input className="flex-1 bg-transparent p-2 text-[10px] text-gray-400 outline-none placeholder-gray-700" placeholder="Paste link..." value={n.previewLink || ''}
+                              onFocus={() => { isTypingRef.current = true; }}
+                              onChange={e => updateNode(n.id, { previewLink: e.target.value })}
+                              onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
+                            />
+                          </div>
+                          {n.previewLink?.trim() && (
+                            <a href={n.previewLink.startsWith('http') ? n.previewLink : `https://${n.previewLink}`} target="_blank" rel="noopener noreferrer" className="mt-1.5 block w-full bg-white/[0.05] hover:bg-white/[0.08] text-gray-500 hover:text-white py-1.5 rounded-lg text-[9px] font-medium text-center transition-all">Preview ↗</a>
+                          )}
                         </div>
                       </>
-                    ) : (
-                      <button onMouseDown={(e) => handleStartLink(e, n.id, 'default')} className="w-6 h-full flex items-center justify-center text-gray-400 hover:text-[#0A84FF] transition-colors" title="Connect"><Plus size={14} strokeWidth={2.5} /></button>
                     )}
+                    {n.type === 'split' && (
+                      <input className="w-full bg-white/[0.03] p-2 rounded-lg text-[10px] text-gray-500 outline-none border border-white/[0.04] focus:border-white/[0.08]" placeholder="Condition..." value={n.condition || ''}
+                        onFocus={() => { isTypingRef.current = true; }}
+                        onChange={e => updateNode(n.id, { condition: e.target.value })}
+                        onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
+                      />
+                    )}
+                    {n.type === 'delay' && (
+                      <div className="flex gap-2">
+                        <input type="number" className="w-1/2 bg-white/[0.03] p-2 rounded-lg text-xs text-white border border-white/[0.04] outline-none focus:border-white/[0.08]" value={n.value || ''}
+                          onFocus={() => { isTypingRef.current = true; }}
+                          onChange={e => updateNode(n.id, { value: e.target.value })}
+                          onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
+                        />
+                        <select className="w-1/2 bg-white/[0.03] p-2 rounded-lg text-[10px] text-gray-500 border border-white/[0.04] outline-none cursor-pointer" value={n.unit || 'Hours'}
+                          onChange={e => updateNode(n.id, { unit: e.target.value }, true)}>
+                          <option>Minutes</option><option>Hours</option><option>Days</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* PORT */}
+                  <div className="absolute -bottom-2 left-0 w-full flex justify-center z-30 pointer-events-none">
+                    <div className="pointer-events-auto relative group flex items-center justify-center bg-[#1a1a1a] border border-white/[0.06] rounded-full h-5 hover:h-6 hover:px-0.5 transition-all cursor-pointer">
+                      {n.type === 'split' ? (
+                        <>
+                          <div className="w-5 h-full flex items-center justify-center text-gray-600 group-hover:hidden"><Plus size={12} strokeWidth={2}/></div>
+                          <div className="hidden group-hover:flex gap-0.5">
+                            <button onMouseDown={e => startLink(e, n.id, 'true')} className="w-4 h-4 rounded-full bg-green-500/15 text-green-400 hover:bg-green-500 hover:text-white flex items-center justify-center transition-all"><Check size={10} strokeWidth={3}/></button>
+                            <button onMouseDown={e => startLink(e, n.id, 'false')} className="w-4 h-4 rounded-full bg-red-500/15 text-red-400 hover:bg-red-500 hover:text-white flex items-center justify-center transition-all"><X size={10} strokeWidth={3}/></button>
+                          </div>
+                        </>
+                      ) : (
+                        <button onMouseDown={e => startLink(e, n.id, 'default')} className="w-5 h-full flex items-center justify-center text-gray-600 hover:text-blue-400 transition-colors"><Plus size={12} strokeWidth={2}/></button>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </main>
+
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #333; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background-color: #444; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
       `}</style>
     </div>
   );
 }
 
-const ToolBtn = ({ icon, onClick }) => (
-  <button onClick={onClick} className="p-2.5 text-gray-600 hover:text-white hover:bg-white/[0.06] rounded-lg transition-all active:scale-95">
-    {icon}
-  </button>
+const TB = ({ icon, onClick }) => (
+  <button onClick={onClick} className="p-2 text-gray-600 hover:text-white hover:bg-white/[0.06] rounded-md transition-all active:scale-95">{icon}</button>
 );
