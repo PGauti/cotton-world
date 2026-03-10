@@ -38,7 +38,7 @@ const Icon = ({ d, size = 14, ...props }) => (
 );
 
 const TriggerIcon = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m-10-10h4m12 0h4"/><path d="M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83m0-14.14l-2.83 2.83m-8.48 8.48l-2.83 2.83"/></>} />;
-const WhatsAppIcon = (p) => <Icon {...p} d={<><path d="M3 21l1.65-3.8a9 9 0 1 1 3.4 2.9L3 21"/><path d="M9 10a.5.5 0 0 0 1 0V9a.5.5 0 0 0-1 0v1zm5 0a.5.5 0 0 0 1 0V9a.5.5 0 0 0-1 0v1z"/><path d="M9.5 13.5a3.5 3.5 0 0 0 5 0"/></>} />;
+const WhatsAppIcon = (p) => <Icon {...p} d={<><path d="M3 21l1.65-3.8a9 9 0 1 1 3.4 2.9L3 21"/><path d="M9 10l1.5 1.5L15 8"/></>} />;
 const VoiceIcon = (p) => <Icon {...p} d={<><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></>} />;
 const EmailIcon = (p) => <Icon {...p} d={<><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 7L2 7"/></>} />;
 const SMSIcon = (p) => <Icon {...p} d={<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 10h.01M12 10h.01M16 10h.01"/></>} />;
@@ -72,6 +72,8 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [showAuthInput, setShowAuthInput] = useState(false);
   const [authInput, setAuthInput] = useState('');
+  const tridentTaps = useRef(0);
+  const tridentTimer = useRef(null);
 
   const cache = useRef(loadCache());
   const [journeys, setJourneys] = useState(cache.current?.j || INIT_J);
@@ -211,6 +213,14 @@ export default function App() {
     const newJ = [...journeys, { id: nid, title: 'New Journey', desc: 'Click to edit.' }];
     setJourneys(newJ); latest.current.j = newJ; setActiveJId(nid); triggerSync(true);
   };
+  const updateJourney = (id, upd, force = false) => {
+    setJourneys(prev => {
+      const updated = prev.map(j => j.id === id ? { ...j, ...upd } : j);
+      latest.current.j = updated;
+      triggerSync(force);
+      return updated;
+    });
+  };
   const dupJourney = (id, ev) => {
     ev.stopPropagation(); const j = journeys.find(x => x.id === id); if (!j) return;
     const nid = `j-${Date.now()}`; const idMap = {};
@@ -324,22 +334,47 @@ export default function App() {
           ))}
         </div>
 
-        <div className="p-3 border-t border-white/[0.04]">
-          {showAuthInput && !isAdmin && (
-            <div className="mb-2 flex gap-1">
-              <input type="password" placeholder="Passcode" className="flex-1 bg-white/[0.03] border border-white/[0.06] rounded-md px-2 py-1.5 text-[10px] text-white outline-none focus:border-white/10" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === '1123581321' && (setIsAdmin(true), setShowAuthInput(false))} />
-              <button onClick={() => { if (authInput === '1123581321') { setIsAdmin(true); setShowAuthInput(false); }}} className="bg-white/[0.06] px-2 py-1.5 rounded-md text-[9px] text-white/50 hover:text-white hover:bg-white/[0.1] transition-colors">Go</button>
-            </div>
-          )}
-          <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[9px] text-white/20 hover:text-white/40 transition-all">
-            {isAdmin ? <Unlock size={10} strokeWidth={1.5}/> : <Lock size={10} strokeWidth={1.5}/>} {isAdmin ? 'Admin' : 'Admin Login'}
-          </button>
+        {/* Hidden admin — trident Ψ in the corner, tap 3 times to reveal */}
+        <div className="px-3 py-2 flex items-center justify-between">
+          {/* Admin controls — only visible when unlocked */}
           {isAdmin && (
-            <div className="flex gap-1 mt-1.5">
+            <div className="flex gap-1 flex-1 mr-2">
               <button onClick={handleSaveMaster} className="flex-1 py-1.5 rounded-md bg-emerald-500/8 text-emerald-400/60 hover:text-emerald-400 text-[8px] font-medium flex items-center justify-center gap-1 transition-colors"><Save size={9}/> Save Master</button>
               <button onClick={handleResetFlow} className="flex-1 py-1.5 rounded-md bg-red-500/8 text-red-400/60 hover:text-red-400 text-[8px] font-medium flex items-center justify-center gap-1 transition-colors"><RefreshCw size={9}/> Reset</button>
             </div>
           )}
+
+          {/* Login field — appears after 3 trident taps */}
+          {showAuthInput && !isAdmin && (
+            <div className="flex gap-1 flex-1 mr-2">
+              <input type="password" placeholder="anaklusmos" className="flex-1 bg-white/[0.03] border border-white/[0.04] rounded-md px-2 py-1.5 text-[10px] text-white outline-none focus:border-white/10 placeholder-white/10" value={authInput} onChange={e => setAuthInput(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && authInput === '1123581321') { setIsAdmin(true); setShowAuthInput(false); setAuthInput(''); }
+                  if (e.key === 'Escape') { setShowAuthInput(false); setAuthInput(''); }
+                }}
+                autoFocus
+              />
+            </div>
+          )}
+
+          {/* The trident — nearly invisible, bottom-right corner */}
+          <button
+            onClick={() => {
+              if (isAdmin) { setIsAdmin(false); return; }
+              tridentTaps.current++;
+              clearTimeout(tridentTimer.current);
+              tridentTimer.current = setTimeout(() => { tridentTaps.current = 0; }, 800);
+              if (tridentTaps.current >= 3) {
+                tridentTaps.current = 0;
+                setShowAuthInput(true);
+              }
+            }}
+            className={`text-[11px] ml-auto transition-all duration-300 select-none ${isAdmin ? 'text-white/20 hover:text-white/40' : 'text-white/[0.04] hover:text-white/[0.06]'}`}
+            title=""
+            style={{ cursor: 'default', lineHeight: 1 }}
+          >
+            Ψ
+          </button>
         </div>
       </aside>
 
@@ -347,8 +382,27 @@ export default function App() {
       <main className="flex-1 relative overflow-hidden bg-[#0a0a0a]" ref={canvasRef}>
         <header className="absolute top-0 left-0 right-0 px-8 pt-7 flex justify-between items-start z-40 pointer-events-none">
           <div className="pointer-events-auto">
-            <h1 className="text-xl font-medium text-white/80 tracking-tight">{activeJ?.title}</h1>
-            <p className="text-white/20 mt-0.5 text-[11px]">{activeJ?.desc}</p>
+            {isAdmin ? (
+              <>
+                <input className="text-xl font-medium text-white/80 tracking-tight bg-transparent outline-none w-full border-b border-transparent focus:border-white/10 transition-colors"
+                  value={activeJ?.title || ''} placeholder="Journey title..."
+                  onFocus={() => { isTypingRef.current = true; }}
+                  onChange={e => updateJourney(activeJId, { title: e.target.value })}
+                  onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
+                />
+                <input className="text-white/20 mt-0.5 text-[11px] bg-transparent outline-none w-full border-b border-transparent focus:border-white/10 transition-colors"
+                  value={activeJ?.desc || ''} placeholder="Description..."
+                  onFocus={() => { isTypingRef.current = true; }}
+                  onChange={e => updateJourney(activeJId, { desc: e.target.value })}
+                  onBlur={() => { isTypingRef.current = false; triggerSync(true); }}
+                />
+              </>
+            ) : (
+              <>
+                <h1 className="text-xl font-medium text-white/80 tracking-tight">{activeJ?.title}</h1>
+                <p className="text-white/20 mt-0.5 text-[11px]">{activeJ?.desc}</p>
+              </>
+            )}
           </div>
 
           {/* TOOLBAR — clean, labeled */}
@@ -372,13 +426,13 @@ export default function App() {
               const fp = getPos(fN), tp = getPos(tN);
               const off = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
               const x1 = fp.x + 140 + off, y1 = fp.y + getH(fN), x2 = tp.x + 140, y2 = tp.y + 8;
-              const col = e.port === 'true' ? '#22C55E' : e.port === 'false' ? '#EF4444' : '#333';
+              const col = e.port === 'true' ? '#22C55E' : e.port === 'false' ? '#EF4444' : '#666';
               const mid = bezMid(x1, y1, x2, y2);
               const isHovered = hoveredEdge === e.id;
               return (
                 <g key={e.id}>
                   {/* Visible line */}
-                  <path d={svgPath(x1, y1, x2, y2)} stroke={col} strokeWidth={isHovered ? "2" : "1.5"} fill="none" opacity={isHovered ? "0.6" : "0.2"} style={{ transition: 'opacity 0.15s, stroke-width 0.15s' }} />
+                  <path d={svgPath(x1, y1, x2, y2)} stroke={col} strokeWidth={isHovered ? "2.5" : "2"} fill="none" opacity={isHovered ? "0.8" : "0.5"} style={{ transition: 'opacity 0.15s, stroke-width 0.15s' }} />
                   {/* Wide invisible hover target */}
                   <path d={svgPath(x1, y1, x2, y2)} stroke="transparent" strokeWidth="24" fill="none" className="pointer-events-auto" style={{ cursor: 'pointer' }}
                     onMouseEnter={() => setHoveredEdge(e.id)} onMouseLeave={() => setHoveredEdge(null)} />
@@ -399,7 +453,7 @@ export default function App() {
             {linking && (() => {
               const fn = curNodes.find(n => n.id === linking.fromId); if (!fn) return null;
               const fp = getPos(fn); const off = linking.port === 'true' ? -40 : linking.port === 'false' ? 40 : 0;
-              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#3B82F6" strokeWidth="1.5" strokeDasharray="4,3" fill="none" opacity="0.35" />;
+              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#3B82F6" strokeWidth="2" strokeDasharray="4,3" fill="none" opacity="0.6" />;
             })()}
           </svg>
 
