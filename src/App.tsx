@@ -1,13 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
-  MessageSquare, Phone, Clock, Zap, Trash2, GitBranch,
-  Smartphone, Plus, Check, X, Link as LinkIcon, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle, Loader2
+  Trash2, Plus, Check, X, Link as LinkIcon, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle
 } from 'lucide-react';
 
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-// KEY FIX: Use initializeFirestore + memoryLocalCache instead of getFirestore
-// This prevents setDoc from hanging forever when security rules block writes
 import { initializeFirestore, memoryLocalCache, doc, setDoc, onSnapshot, getDoc } from 'firebase/firestore';
 
 const firebaseConfig = {
@@ -23,7 +20,6 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-// KEY FIX: memoryLocalCache = writes properly fail instead of hanging
 const db = initializeFirestore(app, { localCache: memoryLocalCache() });
 const APP_ID = 'cottonworld-unified-sync-final-v3';
 const LS_KEY = 'cw_cache_v4';
@@ -32,14 +28,23 @@ const LS_TAB = 'cw_active_journey';
 function docRef(sub) { return doc(db, 'artifacts', APP_ID, 'public', 'data', 'dashboardState', sub); }
 function loadCache() { try { const d = JSON.parse(localStorage.getItem(LS_KEY)); return d?.j ? d : null; } catch { return null; } }
 function saveCache(j, n, e) { try { localStorage.setItem(LS_KEY, JSON.stringify({ j, n, e, t: Date.now() })); } catch {} }
-
-// KEY FIX: Timeout wrapper — if Firebase doesn't respond in 8 seconds, fail loudly
 function withTimeout(promise, ms = 8000) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('TIMEOUT: Firebase did not respond in ' + (ms/1000) + 's. Check your Firestore Rules and Auth settings.')), ms))
-  ]);
+  return Promise.race([promise, new Promise((_, rej) => setTimeout(() => rej(new Error('TIMEOUT: Firebase did not respond in ' + (ms/1000) + 's.')), ms))]);
 }
+
+// --- CUSTOM TOOLBAR ICONS (clean, identifiable) ---
+const Icon = ({ d, size = 14, ...props }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" {...props}>{d}</svg>
+);
+
+const TriggerIcon = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4m-10-10h4m12 0h4"/><path d="M4.93 4.93l2.83 2.83m8.48 8.48l2.83 2.83m0-14.14l-2.83 2.83m-8.48 8.48l-2.83 2.83"/></>} />;
+const WhatsAppIcon = (p) => <Icon {...p} d={<><path d="M3 21l1.65-3.8a9 9 0 1 1 3.4 2.9L3 21"/><path d="M9 10a.5.5 0 0 0 1 0V9a.5.5 0 0 0-1 0v1zm5 0a.5.5 0 0 0 1 0V9a.5.5 0 0 0-1 0v1z"/><path d="M9.5 13.5a3.5 3.5 0 0 0 5 0"/></>} />;
+const VoiceIcon = (p) => <Icon {...p} d={<><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 22 16.92z"/></>} />;
+const EmailIcon = (p) => <Icon {...p} d={<><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M22 7l-10 7L2 7"/></>} />;
+const SMSIcon = (p) => <Icon {...p} d={<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M8 10h.01M12 10h.01M16 10h.01"/></>} />;
+const RCSIcon = (p) => <Icon {...p} d={<><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/><circle cx="12" cy="12" r="1"/><circle cx="8" cy="12" r="1"/><circle cx="16" cy="12" r="1"/></>} />;
+const DelayIcon = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>} />;
+const SplitIcon = (p) => <Icon {...p} d={<><circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M12 15V9"/><path d="M9 9l3 3 3-3"/></>} />;
 
 const INIT_J = [
   { id: 'j1', title: 'Cart Abandonment', desc: 'WhatsApp/RCS + Voice Bot escalation.' },
@@ -85,13 +90,16 @@ export default function App() {
   const isTypingRef = useRef(false);
   const isSyncing = useRef(false);
 
-  // --- SIDEBAR REORDER ---
   const [sidebarDragId, setSidebarDragId] = useState(null);
   const [sidebarOverId, setSidebarOverId] = useState(null);
+
   const pendingSync = useRef(false);
   const lastWriteTime = useRef(0);
   const GUARD_MS = 2500;
   const dirtyRef = useRef(false);
+
+  // Hovered edge for showing delete button
+  const [hoveredEdge, setHoveredEdge] = useState(null);
 
   useEffect(() => {
     latest.current = { j: journeys, n: nodes, e: edges };
@@ -100,47 +108,27 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem(LS_TAB, activeJId); }, [activeJId]);
 
-  // --- FIREBASE WRITE WITH TIMEOUT ---
   const writeToFirebase = useCallback(async (data) => {
-    if (!user) {
-      setSyncState('error');
-      setSyncError('Not logged in. Refresh the page to retry authentication.');
-      return;
-    }
+    if (!user) { setSyncState('error'); setSyncError('Not logged in. Refresh to retry.'); return; }
     if (isSyncing.current) { pendingSync.current = true; return; }
     isSyncing.current = true;
     setSyncState('writing');
     try {
       lastWriteTime.current = Date.now();
-      // KEY FIX: withTimeout ensures we NEVER hang forever
       await withTimeout(setDoc(docRef('current'), {
-        journeysList: data.j, nodeData: data.n, edgeData: data.e,
-        lastUpdated: new Date().toISOString()
+        journeysList: data.j, nodeData: data.n, edgeData: data.e, lastUpdated: new Date().toISOString()
       }), 8000);
       dirtyRef.current = false;
-      setSyncState('synced');
-      setSyncError(null);
-      setLastSyncTime(new Date());
+      setSyncState('synced'); setSyncError(null); setLastSyncTime(new Date());
     } catch (err) {
-      console.error('Firebase write failed:', err);
       setSyncState('error');
-      // Give user-friendly error messages
-      if (err.code === 'permission-denied') {
-        setSyncError('PERMISSION DENIED: Go to Firebase Console → Firestore → Rules tab, and update your security rules to allow writes. See the guide above.');
-      } else if (err.message?.includes('TIMEOUT')) {
-        setSyncError(err.message);
-      } else if (err.code === 'unauthenticated') {
-        setSyncError('AUTH ERROR: Go to Firebase Console → Authentication → Sign-in method, and enable Anonymous sign-in.');
-      } else {
-        setSyncError(`Write failed: ${err.code || err.message}. Check Firebase Console settings.`);
-      }
+      if (err.code === 'permission-denied') setSyncError('PERMISSION DENIED: Update Firestore security rules.');
+      else if (err.message?.includes('TIMEOUT')) setSyncError(err.message);
+      else setSyncError(`Write failed: ${err.code || err.message}`);
       pendingSync.current = true;
     } finally {
       isSyncing.current = false;
-      if (pendingSync.current) {
-        pendingSync.current = false;
-        setTimeout(() => writeToFirebase(latest.current), 2000);
-      }
+      if (pendingSync.current) { pendingSync.current = false; setTimeout(() => writeToFirebase(latest.current), 2000); }
     }
   }, [user]);
 
@@ -149,155 +137,92 @@ export default function App() {
     saveCache(latest.current.j, latest.current.n, latest.current.e);
     if (!user) return;
     dirtyRef.current = true;
-    if (force) {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      writeToFirebase(latest.current);
-    } else {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(() => writeToFirebase(latest.current), 150);
-    }
+    if (force) { clearTimeout(debounceRef.current); writeToFirebase(latest.current); }
+    else { clearTimeout(debounceRef.current); debounceRef.current = setTimeout(() => writeToFirebase(latest.current), 150); }
   }, [user, writeToFirebase]);
 
-  // --- AUTH ---
   useEffect(() => {
     setSyncState('authing');
-    signInAnonymously(auth)
-      .then(() => { setSyncError(null); })
-      .catch((err) => {
-        console.error('Auth failed:', err);
-        setSyncState('error');
-        setSyncError('AUTH FAILED: Go to Firebase Console → Authentication → Sign-in method → enable Anonymous. Error: ' + err.code);
-      });
-    return onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      if (u) setSyncState('ready');
+    signInAnonymously(auth).then(() => setSyncError(null)).catch(err => {
+      setSyncState('error'); setSyncError('AUTH FAILED: Enable Anonymous sign-in in Firebase Console. ' + err.code);
     });
+    return onAuthStateChanged(auth, u => { setUser(u); if (u) setSyncState('ready'); });
   }, []);
 
-  // --- SNAPSHOT LISTENER ---
   useEffect(() => {
     if (!user) return;
-    const unsub = onSnapshot(docRef('current'), (snap) => {
+    const unsub = onSnapshot(docRef('current'), snap => {
       if (snap.exists()) {
         const d = snap.data();
-        const isEcho = snap.metadata.hasPendingWrites;
-        const isBusy = isDraggingRef.current || isTypingRef.current;
-        const isRecent = (Date.now() - lastWriteTime.current) < GUARD_MS;
-        if (!isEcho && !isBusy && !isRecent) {
-          setJourneys(d.journeysList || INIT_J);
-          setNodes(d.nodeData || INIT_N);
-          setEdges(d.edgeData || INIT_E);
+        if (!snap.metadata.hasPendingWrites && !isDraggingRef.current && !isTypingRef.current && (Date.now() - lastWriteTime.current) > GUARD_MS) {
+          setJourneys(d.journeysList || INIT_J); setNodes(d.nodeData || INIT_N); setEdges(d.edgeData || INIT_E);
           latest.current = { j: d.journeysList || INIT_J, n: d.nodeData || INIT_N, e: d.edgeData || INIT_E };
           saveCache(latest.current.j, latest.current.n, latest.current.e);
         }
         if (!dirtyRef.current) { setSyncState('synced'); setSyncError(null); }
-      } else {
-        writeToFirebase(latest.current);
-      }
-    }, (err) => {
-      console.error('Snapshot error:', err);
-      setSyncState('error');
-      if (err.code === 'permission-denied') {
-        setSyncError('PERMISSION DENIED on read: Update your Firestore security rules to allow reads. See the guide above.');
-      } else {
-        setSyncError('Listener error: ' + (err.code || err.message));
-      }
-    });
+      } else writeToFirebase(latest.current);
+    }, err => { setSyncState('error'); setSyncError('Listener: ' + (err.code || err.message)); });
     return () => unsub();
   }, [user, writeToFirebase]);
 
-  // --- UNLOAD PROTECTION ---
   useEffect(() => {
-    const onUnload = (e) => {
+    const onUnload = e => {
       saveCache(latest.current.j, latest.current.n, latest.current.e);
       if (dirtyRef.current || isSyncing.current) {
-        e.preventDefault();
-        e.returnValue = 'Changes not synced to cloud yet. Leave anyway?';
-        if (user) setDoc(docRef('current'), {
-          journeysList: latest.current.j, nodeData: latest.current.n, edgeData: latest.current.e,
-          lastUpdated: new Date().toISOString()
-        }).catch(() => {});
+        e.preventDefault(); e.returnValue = 'Changes not synced yet.';
+        if (user) setDoc(docRef('current'), { journeysList: latest.current.j, nodeData: latest.current.n, edgeData: latest.current.e, lastUpdated: new Date().toISOString() }).catch(() => {});
         return e.returnValue;
       }
     };
-    const onVis = () => {
-      if (document.visibilityState === 'hidden') {
-        saveCache(latest.current.j, latest.current.n, latest.current.e);
-        if (user && dirtyRef.current) writeToFirebase(latest.current);
-      }
-    };
-    window.addEventListener('beforeunload', onUnload);
-    document.addEventListener('visibilitychange', onVis);
+    const onVis = () => { if (document.visibilityState === 'hidden') { saveCache(latest.current.j, latest.current.n, latest.current.e); if (user && dirtyRef.current) writeToFirebase(latest.current); } };
+    window.addEventListener('beforeunload', onUnload); document.addEventListener('visibilitychange', onVis);
     return () => { window.removeEventListener('beforeunload', onUnload); document.removeEventListener('visibilitychange', onVis); };
   }, [user, writeToFirebase]);
 
-  // --- GLOBAL MOUSE UP ---
   useEffect(() => {
     const up = () => {
       if (dragId && dragPos) {
-        const finalX = dragPos.x - dragOffset.x;
-        const finalY = dragPos.y - dragOffset.y;
-        setNodes(prev => {
-          const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: finalX, y: finalY } : n) };
-          latest.current.n = nd;
-          return nd;
-        });
-        triggerSync(true);
-        isDraggingRef.current = false;
+        setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y } : n) }; latest.current.n = nd; return nd; });
+        triggerSync(true); isDraggingRef.current = false;
       }
-      setDragId(null);
-      setDragPos(null);
-      setLinking(null);
+      setDragId(null); setDragPos(null); setLinking(null);
     };
-    window.addEventListener('mouseup', up);
-    return () => window.removeEventListener('mouseup', up);
+    window.addEventListener('mouseup', up); return () => window.removeEventListener('mouseup', up);
   }, [dragId, dragPos, dragOffset, activeJId, triggerSync]);
 
   // --- ADMIN ---
   const handleSaveMaster = async () => {
     if (!user || !isAdmin) return;
-    try {
-      await withTimeout(setDoc(docRef('master'), { journeysList: journeys, nodeData: nodes, edgeData: edges, lastUpdated: new Date().toISOString() }));
-      alert('Master template saved!');
-    } catch (e) { alert('Save failed: ' + e.message); }
+    try { await withTimeout(setDoc(docRef('master'), { journeysList: journeys, nodeData: nodes, edgeData: edges, lastUpdated: new Date().toISOString() })); alert('Master saved!'); } catch (e) { alert('Failed: ' + e.message); }
   };
   const handleResetFlow = async () => {
-    if (!user || !isAdmin || !window.confirm('Overwrite current flow with Master?')) return;
+    if (!user || !isAdmin || !window.confirm('Overwrite with Master template?')) return;
     try {
       const snap = await getDoc(docRef('master'));
       const d = snap.exists() ? snap.data() : { journeysList: INIT_J, nodeData: INIT_N, edgeData: INIT_E };
       setJourneys(d.journeysList); setNodes(d.nodeData); setEdges(d.edgeData);
-      latest.current = { j: d.journeysList, n: d.nodeData, e: d.edgeData };
-      await writeToFirebase(latest.current);
-    } catch (e) { alert('Reset failed: ' + e.message); }
+      latest.current = { j: d.journeysList, n: d.nodeData, e: d.edgeData }; await writeToFirebase(latest.current);
+    } catch (e) { alert('Failed: ' + e.message); }
   };
 
   // --- JOURNEY CRUD ---
   const addJourney = () => {
     const nid = `j-${Date.now()}`;
-    const newJ = [...journeys, { id: nid, title: 'New Journey', desc: 'Click to edit description.' }];
-    setJourneys(newJ); latest.current.j = newJ;
-    setActiveJId(nid);
-    triggerSync(true);
+    const newJ = [...journeys, { id: nid, title: 'New Journey', desc: 'Click to edit.' }];
+    setJourneys(newJ); latest.current.j = newJ; setActiveJId(nid); triggerSync(true);
   };
   const dupJourney = (id, ev) => {
-    ev.stopPropagation();
-    const j = journeys.find(x => x.id === id); if (!j) return;
-    const nid = `j-${Date.now()}`;
-    const idMap = {};
+    ev.stopPropagation(); const j = journeys.find(x => x.id === id); if (!j) return;
+    const nid = `j-${Date.now()}`; const idMap = {};
     const nn = (nodes[id] || []).map(n => { const k = `nd-${Date.now()}-${Math.random().toString(36).slice(2,6)}`; idMap[n.id] = k; return { ...n, id: k }; });
     const ne = (edges[id] || []).map(e => ({ ...e, id: `e-${Date.now()}-${Math.random().toString(36).slice(2,6)}`, from: idMap[e.from] || e.from, to: idMap[e.to] || e.to }));
     const newJ = [...journeys, { ...j, id: nid, title: j.title + ' (Copy)' }];
     setJourneys(newJ); setNodes(p => ({ ...p, [nid]: nn })); setEdges(p => ({ ...p, [nid]: ne }));
-    latest.current = { j: newJ, n: { ...nodes, [nid]: nn }, e: { ...edges, [nid]: ne } };
-    setActiveJId(nid); triggerSync(true);
+    latest.current = { j: newJ, n: { ...nodes, [nid]: nn }, e: { ...edges, [nid]: ne } }; setActiveJId(nid); triggerSync(true);
   };
   const delJourney = (id, ev) => {
-    ev.stopPropagation();
-    const nl = journeys.filter(x => x.id !== id);
-    setJourneys(nl); latest.current.j = nl;
-    if (activeJId === id && nl.length) setActiveJId(nl[0].id);
-    triggerSync(true);
+    ev.stopPropagation(); const nl = journeys.filter(x => x.id !== id);
+    setJourneys(nl); latest.current.j = nl; if (activeJId === id && nl.length) setActiveJId(nl[0].id); triggerSync(true);
   };
 
   // --- NODE CRUD ---
@@ -311,33 +236,14 @@ export default function App() {
     };
     setNodes(prev => { const nd = { ...prev, [activeJId]: [...(prev[activeJId] || []), n] }; latest.current.n = nd; triggerSync(true); return nd; });
   };
-  const dupNode = (nid) => {
-    const orig = (nodes[activeJId] || []).find(n => n.id === nid); if (!orig) return;
-    const nn = { ...orig, id: `nd-${Date.now()}`, x: orig.x + 30, y: orig.y + 30 };
-    setNodes(prev => { const nd = { ...prev, [activeJId]: [...(prev[activeJId] || []), nn] }; latest.current.n = nd; triggerSync(true); return nd; });
-  };
-  const delNode = (id) => {
-    setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).filter(n => n.id !== id) }; latest.current.n = nd; return nd; });
-    setEdges(prev => { const ed = { ...prev, [activeJId]: (prev[activeJId] || []).filter(e => e.from !== id && e.to !== id) }; latest.current.e = ed; triggerSync(true); return ed; });
-  };
-  const updateNode = (id, upd, force = false) => {
-    setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === id ? { ...n, ...upd } : n) }; latest.current.n = nd; triggerSync(force); return nd; });
-  };
+  const dupNode = (nid) => { const o = (nodes[activeJId] || []).find(n => n.id === nid); if (!o) return; const nn = { ...o, id: `nd-${Date.now()}`, x: o.x + 30, y: o.y + 30 }; setNodes(p => { const nd = { ...p, [activeJId]: [...(p[activeJId] || []), nn] }; latest.current.n = nd; triggerSync(true); return nd; }); };
+  const delNode = (id) => { setNodes(p => { const nd = { ...p, [activeJId]: (p[activeJId] || []).filter(n => n.id !== id) }; latest.current.n = nd; return nd; }); setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.from !== id && e.to !== id) }; latest.current.e = ed; triggerSync(true); return ed; }); };
+  const updateNode = (id, upd, force = false) => { setNodes(p => { const nd = { ...p, [activeJId]: (p[activeJId] || []).map(n => n.id === id ? { ...n, ...upd } : n) }; latest.current.n = nd; triggerSync(force); return nd; }); };
 
-  // --- LINKING ---
   const startLink = (e, id, port) => { e.stopPropagation(); e.preventDefault(); setLinking({ fromId: id, port }); };
-  const endLink = (targetId) => {
-    if (linking && linking.fromId !== targetId) {
-      const ne = { id: `e-${Date.now()}`, from: linking.fromId, to: targetId, port: linking.port };
-      setEdges(prev => { const ed = { ...prev, [activeJId]: [...(prev[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; });
-    }
-    setLinking(null);
-  };
-  const delEdge = (eid) => {
-    setEdges(prev => { const ed = { ...prev, [activeJId]: (prev[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; });
-  };
+  const endLink = (tid) => { if (linking && linking.fromId !== tid) { const ne = { id: `e-${Date.now()}`, from: linking.fromId, to: tid, port: linking.port }; setEdges(p => { const ed = { ...p, [activeJId]: [...(p[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; }); } setLinking(null); };
+  const delEdge = (eid) => { setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; }); };
 
-  // --- CANVAS ---
   const onCanvasMove = (e) => {
     if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
@@ -352,210 +258,218 @@ export default function App() {
     return { x: node.x, y: node.y };
   }, [dragId, dragPos, dragOffset]);
 
-  const getH = (n) => {
-    if (n.type === 'trigger') return 90;
-    if (n.type === 'split') return 140;
-    if (n.type === 'delay') return 110;
-    if (n.type === 'action') return (n.previewLink?.trim()) ? 240 : 180;
-    return 140;
-  };
-  const svgPath = (x1, y1, x2, y2) => {
+  const getH = (n) => { if (n.type === 'trigger') return 90; if (n.type === 'split') return 140; if (n.type === 'delay') return 110; if (n.type === 'action') return (n.previewLink?.trim()) ? 240 : 180; return 140; };
+  const svgPath = (x1, y1, x2, y2) => { const c = Math.max(60, Math.abs(y2 - y1) / 2); return `M${x1},${y1} C${x1},${y1 + c} ${x2},${y2 - c} ${x2},${y2}`; };
+  // True bezier midpoint at t=0.5
+  const bezMid = (x1, y1, x2, y2) => {
     const c = Math.max(60, Math.abs(y2 - y1) / 2);
-    return `M${x1},${y1} C${x1},${y1 + c} ${x2},${y2 - c} ${x2},${y2}`;
+    const cp1y = y1 + c, cp2y = y2 - c;
+    const t = 0.5, u = 1 - t;
+    return {
+      x: u*u*u*x1 + 3*u*u*t*x1 + 3*u*t*t*x2 + t*t*t*x2,
+      y: u*u*u*y1 + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*y2
+    };
   };
 
   const curNodes = nodes[activeJId] || [];
   const curEdges = edges[activeJId] || [];
   const activeJ = journeys.find(j => j.id === activeJId);
-
-  const syncColor = { init: '#666', authing: '#F59E0B', ready: '#F59E0B', writing: '#F59E0B', synced: '#22C55E', error: '#EF4444' }[syncState] || '#666';
-  const syncLabel = { init: 'Starting...', authing: 'Authenticating...', ready: 'Connected', writing: 'Saving...', synced: 'Synced', error: 'Error' }[syncState] || syncState;
+  const syncColor = { init: '#555', authing: '#F59E0B', ready: '#F59E0B', writing: '#F59E0B', synced: '#22C55E', error: '#EF4444' }[syncState] || '#555';
+  const syncLabel = { init: 'Starting...', authing: 'Connecting...', ready: 'Connected', writing: 'Saving...', synced: 'Synced', error: 'Error' }[syncState] || syncState;
 
   return (
-    <div className="flex h-screen bg-[#0B0B0B] text-gray-100 font-sans overflow-hidden select-none" onMouseMove={onCanvasMove}>
+    <div className="flex h-screen bg-[#0a0a0a] text-gray-100 overflow-hidden select-none" style={{ fontFamily: '-apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", sans-serif' }} onMouseMove={onCanvasMove}>
+
       {/* SIDEBAR */}
-      <aside className="w-60 bg-[#111] border-r border-white/[0.05] flex flex-col shrink-0 z-50">
-        <div className="px-5 pt-5 pb-3 border-b border-white/[0.05]">
-          <div className="flex justify-between items-center mb-2">
-            <span className="text-[11px] font-semibold uppercase tracking-widest text-white/60">Cottonworld</span>
-            <button onClick={addJourney} className="p-0.5 text-gray-600 hover:text-white transition-colors"><Plus size={14}/></button>
+      <aside className="w-56 bg-[#0f0f0f] border-r border-white/[0.04] flex flex-col shrink-0 z-50">
+        <div className="px-4 pt-5 pb-3 border-b border-white/[0.04]">
+          <div className="flex justify-between items-center mb-3">
+            <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/40">Cottonworld</span>
+            <button onClick={addJourney} className="p-0.5 text-white/20 hover:text-white/60 transition-colors"><Plus size={13} strokeWidth={1.5}/></button>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: syncColor, animation: syncState === 'writing' || syncState === 'authing' ? 'pulse 1.5s infinite' : 'none' }} />
-            <span className="text-[9px] font-medium uppercase tracking-wider text-gray-600">{syncLabel}</span>
-            {lastSyncTime && syncState === 'synced' && <span className="text-[8px] text-gray-700 ml-auto">{lastSyncTime.toLocaleTimeString()}</span>}
+          <div className="flex items-center gap-1.5">
+            <div className="w-[5px] h-[5px] rounded-full" style={{ backgroundColor: syncColor, animation: syncState === 'writing' || syncState === 'authing' ? 'pulse 1.5s infinite' : 'none' }} />
+            <span className="text-[8px] font-medium uppercase tracking-wider text-white/25">{syncLabel}</span>
+            {lastSyncTime && syncState === 'synced' && <span className="text-[8px] text-white/15 ml-auto">{lastSyncTime.toLocaleTimeString()}</span>}
           </div>
-          {/* ERROR BOX — shows exactly what's wrong */}
           {syncError && (
-            <div className="mt-2 p-2.5 bg-red-500/10 border border-red-500/20 rounded-lg">
-              <p className="text-[9px] text-red-400 font-medium leading-relaxed">{syncError}</p>
-              {user && <button onClick={() => { setSyncError(null); setSyncState('writing'); writeToFirebase(latest.current); }} className="mt-1.5 text-[9px] bg-red-500/20 hover:bg-red-500/30 text-red-300 px-2 py-1 rounded transition-colors">Retry Now</button>}
+            <div className="mt-2 p-2 bg-red-500/8 border border-red-500/15 rounded-lg">
+              <p className="text-[8px] text-red-400/80 leading-relaxed">{syncError}</p>
+              {user && <button onClick={() => { setSyncError(null); setSyncState('writing'); writeToFirebase(latest.current); }} className="mt-1 text-[8px] text-red-300/60 underline">Retry</button>}
             </div>
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-0.5" style={{ scrollbarWidth: 'thin', scrollbarColor: '#333 transparent' }}>
-          {journeys.map((j, idx) => (
-            <div key={j.id}
-              draggable
-              onDragStart={() => setSidebarDragId(j.id)}
-              onDragOver={(e) => { e.preventDefault(); setSidebarOverId(j.id); }}
+        <div className="flex-1 overflow-y-auto py-2 px-2" style={{ scrollbarWidth: 'none' }}>
+          {journeys.map(j => (
+            <div key={j.id} draggable
+              onDragStart={() => setSidebarDragId(j.id)} onDragOver={e => { e.preventDefault(); setSidebarOverId(j.id); }}
               onDragEnd={() => {
                 if (sidebarDragId && sidebarOverId && sidebarDragId !== sidebarOverId) {
-                  const fromIdx = journeys.findIndex(x => x.id === sidebarDragId);
-                  const toIdx = journeys.findIndex(x => x.id === sidebarOverId);
-                  if (fromIdx !== -1 && toIdx !== -1) {
-                    const reordered = [...journeys];
-                    const [moved] = reordered.splice(fromIdx, 1);
-                    reordered.splice(toIdx, 0, moved);
-                    setJourneys(reordered);
-                    latest.current.j = reordered;
-                    triggerSync(true);
-                  }
+                  const fi = journeys.findIndex(x => x.id === sidebarDragId), ti = journeys.findIndex(x => x.id === sidebarOverId);
+                  if (fi !== -1 && ti !== -1) { const r = [...journeys]; const [m] = r.splice(fi, 1); r.splice(ti, 0, m); setJourneys(r); latest.current.j = r; triggerSync(true); }
                 }
-                setSidebarDragId(null);
-                setSidebarOverId(null);
+                setSidebarDragId(null); setSidebarOverId(null);
               }}
               onClick={() => setActiveJId(j.id)}
-              className={`w-full text-left px-3 py-2 rounded-lg text-[11px] font-medium transition-all flex items-center justify-between group cursor-grab active:cursor-grabbing ${
-                sidebarDragId === j.id ? 'opacity-40' : sidebarOverId === j.id && sidebarDragId ? 'border-t-2 border-blue-500/50' : ''
-              } ${activeJId === j.id ? 'bg-white/[0.07] text-white' : 'text-gray-600 hover:text-gray-400 hover:bg-white/[0.03]'}`}>
+              className={`w-full text-left px-3 py-[7px] rounded-md text-[11px] transition-all flex items-center justify-between group cursor-grab active:cursor-grabbing mb-px ${
+                sidebarDragId === j.id ? 'opacity-30' : sidebarOverId === j.id && sidebarDragId ? 'border-t border-blue-500/30' : ''
+              } ${activeJId === j.id ? 'bg-white/[0.06] text-white/80 font-medium' : 'text-white/30 hover:text-white/50 hover:bg-white/[0.02]'}`}>
               <span className="truncate flex-1">{j.title}</span>
-              <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={e => dupJourney(j.id, e)} className="p-0.5 text-white/30 hover:text-white"><Copy size={10}/></button>
-                <button onClick={e => delJourney(j.id, e)} className="p-0.5 text-white/30 hover:text-red-400"><Trash2 size={10}/></button>
+              <div className="flex gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity" onMouseDown={e => e.stopPropagation()}>
+                <button onClick={e => dupJourney(j.id, e)} className="p-0.5 text-white/20 hover:text-white/60"><Copy size={9}/></button>
+                <button onClick={e => delJourney(j.id, e)} className="p-0.5 text-white/20 hover:text-red-400/60"><Trash2 size={9}/></button>
               </div>
             </div>
           ))}
         </div>
 
-        <div className="p-3 border-t border-white/[0.05]">
+        <div className="p-3 border-t border-white/[0.04]">
           {showAuthInput && !isAdmin && (
-            <div className="mb-2 flex gap-1.5">
-              <input type="password" placeholder="Passcode" className="flex-1 bg-black border border-white/10 rounded px-2 py-1.5 text-[10px] text-white outline-none focus:border-white/20" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === '1123581321' && (setIsAdmin(true), setShowAuthInput(false))} />
-              <button onClick={() => { if (authInput === '1123581321') { setIsAdmin(true); setShowAuthInput(false); }}} className="bg-white/10 px-2 py-1.5 rounded text-[9px] font-medium text-white hover:bg-white/20">Go</button>
+            <div className="mb-2 flex gap-1">
+              <input type="password" placeholder="Passcode" className="flex-1 bg-white/[0.03] border border-white/[0.06] rounded-md px-2 py-1.5 text-[10px] text-white outline-none focus:border-white/10" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === '1123581321' && (setIsAdmin(true), setShowAuthInput(false))} />
+              <button onClick={() => { if (authInput === '1123581321') { setIsAdmin(true); setShowAuthInput(false); }}} className="bg-white/[0.06] px-2 py-1.5 rounded-md text-[9px] text-white/50 hover:text-white hover:bg-white/[0.1] transition-colors">Go</button>
             </div>
           )}
-          <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-1.5 py-2 rounded-lg bg-white/[0.03] text-[9px] font-medium text-gray-600 hover:text-white transition-all">
-            {isAdmin ? <Unlock size={12}/> : <Lock size={12}/>} {isAdmin ? 'Admin' : 'Admin Login'}
+          <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-md text-[9px] text-white/20 hover:text-white/40 transition-all">
+            {isAdmin ? <Unlock size={10} strokeWidth={1.5}/> : <Lock size={10} strokeWidth={1.5}/>} {isAdmin ? 'Admin' : 'Admin Login'}
           </button>
           {isAdmin && (
-            <div className="flex gap-1.5 mt-2">
-              <button onClick={handleSaveMaster} className="flex-1 py-1.5 rounded-lg bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 text-[9px] font-medium flex items-center justify-center gap-1"><Save size={10}/> Save Master</button>
-              <button onClick={handleResetFlow} className="flex-1 py-1.5 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 text-[9px] font-medium flex items-center justify-center gap-1"><RefreshCw size={10}/> Reset</button>
+            <div className="flex gap-1 mt-1.5">
+              <button onClick={handleSaveMaster} className="flex-1 py-1.5 rounded-md bg-emerald-500/8 text-emerald-400/60 hover:text-emerald-400 text-[8px] font-medium flex items-center justify-center gap-1 transition-colors"><Save size={9}/> Save Master</button>
+              <button onClick={handleResetFlow} className="flex-1 py-1.5 rounded-md bg-red-500/8 text-red-400/60 hover:text-red-400 text-[8px] font-medium flex items-center justify-center gap-1 transition-colors"><RefreshCw size={9}/> Reset</button>
             </div>
           )}
         </div>
       </aside>
 
       {/* CANVAS */}
-      <main className="flex-1 relative overflow-hidden bg-[#0B0B0B]" ref={canvasRef}>
-        <header className="absolute top-0 left-0 right-0 px-8 pt-6 pb-4 flex justify-between items-start z-40 pointer-events-none">
+      <main className="flex-1 relative overflow-hidden bg-[#0a0a0a]" ref={canvasRef}>
+        <header className="absolute top-0 left-0 right-0 px-8 pt-7 flex justify-between items-start z-40 pointer-events-none">
           <div className="pointer-events-auto">
-            <h1 className="text-2xl font-semibold text-white/90 tracking-tight">{activeJ?.title}</h1>
-            <p className="text-gray-600 mt-0.5 text-xs">{activeJ?.desc}</p>
+            <h1 className="text-xl font-medium text-white/80 tracking-tight">{activeJ?.title}</h1>
+            <p className="text-white/20 mt-0.5 text-[11px]">{activeJ?.desc}</p>
           </div>
-          <div className="flex gap-0.5 pointer-events-auto bg-[#161616] p-1 rounded-lg border border-white/[0.05]">
-            <TB icon={<Zap size={13}/>} onClick={() => addNode('trigger')} />
-            <TB icon={<MessageSquare size={13}/>} onClick={() => addNode('action', 'WhatsApp')} />
-            <TB icon={<Phone size={13}/>} onClick={() => addNode('action', 'Voice Bot')} />
-            <TB icon={<Smartphone size={13}/>} onClick={() => addNode('action', 'SMS')} />
-            <TB icon={<Clock size={13}/>} onClick={() => addNode('delay')} />
-            <TB icon={<GitBranch size={13}/>} onClick={() => addNode('split')} />
+
+          {/* TOOLBAR — clean, labeled */}
+          <div className="flex gap-px pointer-events-auto bg-white/[0.03] p-[3px] rounded-lg border border-white/[0.04]">
+            <TBtn icon={<TriggerIcon size={13}/>} label="Trigger" onClick={() => addNode('trigger')} />
+            <TBtn icon={<WhatsAppIcon size={13}/>} label="WhatsApp" onClick={() => addNode('action', 'WhatsApp')} />
+            <TBtn icon={<VoiceIcon size={13}/>} label="Voice" onClick={() => addNode('action', 'Voice Bot')} />
+            <TBtn icon={<EmailIcon size={13}/>} label="Email" onClick={() => addNode('action', 'Email')} />
+            <TBtn icon={<SMSIcon size={13}/>} label="SMS" onClick={() => addNode('action', 'SMS')} />
+            <TBtn icon={<RCSIcon size={13}/>} label="RCS" onClick={() => addNode('action', 'RCS')} />
+            <TBtn icon={<DelayIcon size={13}/>} label="Wait" onClick={() => addNode('delay')} />
+            <TBtn icon={<SplitIcon size={13}/>} label="Split" onClick={() => addNode('split')} />
           </div>
         </header>
 
-        <div className="w-full h-full relative overflow-auto" style={{ backgroundImage: 'radial-gradient(#181818 1px, transparent 1px)', backgroundSize: '40px 40px', scrollbarWidth: 'thin', scrollbarColor: '#222 transparent' }}>
+        <div className="w-full h-full relative overflow-auto" style={{ backgroundImage: 'radial-gradient(#151515 1px, transparent 1px)', backgroundSize: '32px 32px', scrollbarWidth: 'none' }}>
           <svg className="absolute inset-0 pointer-events-none z-0" style={{ width: 5000, height: 5000 }}>
             {curEdges.map(e => {
-              const fromNode = curNodes.find(n => n.id === e.from);
-              const toNode = curNodes.find(n => n.id === e.to);
-              if (!fromNode || !toNode) return null;
-              const fp = getPos(fromNode), tp = getPos(toNode);
+              const fN = curNodes.find(n => n.id === e.from), tN = curNodes.find(n => n.id === e.to);
+              if (!fN || !tN) return null;
+              const fp = getPos(fN), tp = getPos(tN);
               const off = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
-              const x1 = fp.x + 140 + off, y1 = fp.y + getH(fromNode), x2 = tp.x + 140, y2 = tp.y + 8;
-              const col = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#333';
-              const c = Math.max(60, Math.abs(y2 - y1) / 2);
-              const mx = (x1 + x2) / 2, my = (y1 + y2) / 2 + (c * 0.15);
+              const x1 = fp.x + 140 + off, y1 = fp.y + getH(fN), x2 = tp.x + 140, y2 = tp.y + 8;
+              const col = e.port === 'true' ? '#22C55E' : e.port === 'false' ? '#EF4444' : '#333';
+              const mid = bezMid(x1, y1, x2, y2);
+              const isHovered = hoveredEdge === e.id;
               return (
-                <g key={e.id} className="group">
-                  <path d={svgPath(x1, y1, x2, y2)} stroke={col} strokeWidth="1.5" fill="none" opacity="0.25" className="group-hover:opacity-50 transition-all duration-150" />
-                  <path d={svgPath(x1, y1, x2, y2)} stroke="transparent" strokeWidth="18" fill="none" className="pointer-events-auto cursor-pointer" />
-                  <g className="pointer-events-auto cursor-pointer opacity-0 group-hover:opacity-100 transition-opacity duration-150"
-                    onPointerDown={ev => { ev.stopPropagation(); delEdge(e.id); }}>
-                    <circle cx={mx} cy={my} r="20" fill="transparent" />
-                    <circle cx={mx} cy={my} r="9" fill="#111" stroke="#444" strokeWidth="1" className="hover:stroke-red-500 transition-colors" />
-                    <text x={mx} y={my + 3.5} textAnchor="middle" fontSize="11" fill="#666" className="pointer-events-none">×</text>
-                  </g>
+                <g key={e.id}>
+                  {/* Visible line */}
+                  <path d={svgPath(x1, y1, x2, y2)} stroke={col} strokeWidth={isHovered ? "2" : "1.5"} fill="none" opacity={isHovered ? "0.6" : "0.2"} style={{ transition: 'opacity 0.15s, stroke-width 0.15s' }} />
+                  {/* Wide invisible hover target */}
+                  <path d={svgPath(x1, y1, x2, y2)} stroke="transparent" strokeWidth="24" fill="none" className="pointer-events-auto" style={{ cursor: 'pointer' }}
+                    onMouseEnter={() => setHoveredEdge(e.id)} onMouseLeave={() => setHoveredEdge(null)} />
+                  {/* Delete button — only visible on hover */}
+                  {isHovered && (
+                    <g className="pointer-events-auto" style={{ cursor: 'pointer' }}
+                      onPointerDown={ev => { ev.stopPropagation(); delEdge(e.id); setHoveredEdge(null); }}
+                      onMouseEnter={() => setHoveredEdge(e.id)}>
+                      <circle cx={mid.x} cy={mid.y} r="22" fill="transparent" />
+                      <circle cx={mid.x} cy={mid.y} r="10" fill="#151515" stroke="#555" strokeWidth="1" />
+                      <line x1={mid.x - 3} y1={mid.y - 3} x2={mid.x + 3} y2={mid.y + 3} stroke="#888" strokeWidth="1.5" strokeLinecap="round" />
+                      <line x1={mid.x + 3} y1={mid.y - 3} x2={mid.x - 3} y2={mid.y + 3} stroke="#888" strokeWidth="1.5" strokeLinecap="round" />
+                    </g>
+                  )}
                 </g>
               );
             })}
             {linking && (() => {
               const fn = curNodes.find(n => n.id === linking.fromId); if (!fn) return null;
-              const fp = getPos(fn);
-              const off = linking.port === 'true' ? -40 : linking.port === 'false' ? 40 : 0;
-              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#0A84FF" strokeWidth="1.5" strokeDasharray="4,4" fill="none" opacity="0.4" />;
+              const fp = getPos(fn); const off = linking.port === 'true' ? -40 : linking.port === 'false' ? 40 : 0;
+              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#3B82F6" strokeWidth="1.5" strokeDasharray="4,3" fill="none" opacity="0.35" />;
             })()}
           </svg>
 
+          {/* NODES */}
           {curNodes.map(n => {
             const pos = getPos(n);
             return (
               <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}>
                 <div onMouseUp={() => endLink(n.id)}
-                  className={`w-[280px] bg-[#151515] rounded-xl border transition-colors duration-150 ${dragId === n.id ? 'border-white/10 z-50' : linking && linking.fromId !== n.id ? 'border-blue-500/30 z-40' : 'border-white/[0.04] hover:border-white/[0.08] z-20'}`}
-                  style={{ boxShadow: '0 2px 20px rgba(0,0,0,0.4)' }}>
-                  <div onMouseDown={e => { const rect = e.currentTarget.closest('div.absolute').getBoundingClientRect(); setDragOffset({ x: e.clientX - rect.left, y: e.clientY - rect.top }); setDragId(n.id); }}
-                    className="px-4 py-2 border-b border-white/[0.04] flex justify-between items-center cursor-grab active:cursor-grabbing rounded-t-xl">
-                    <span className="text-[9px] font-medium uppercase tracking-wider text-gray-600">{n.channel || n.type}</span>
-                    <div className="flex gap-1" onMouseDown={e => e.stopPropagation()}>
-                      <button onClick={() => dupNode(n.id)} className="p-0.5 text-gray-700 hover:text-white transition-colors"><Copy size={10}/></button>
-                      <button onClick={() => delNode(n.id)} className="p-0.5 text-gray-700 hover:text-red-400 transition-colors"><Trash2 size={10}/></button>
+                  className={`w-[280px] rounded-xl border transition-colors duration-150 ${
+                    dragId === n.id ? 'border-white/[0.08] z-50' : linking && linking.fromId !== n.id ? 'border-blue-500/20 z-40' : 'border-white/[0.04] hover:border-white/[0.06] z-20'
+                  }`}
+                  style={{ background: '#121212', boxShadow: '0 1px 12px rgba(0,0,0,0.5)' }}>
+
+                  {/* Header */}
+                  <div onMouseDown={e => { const r = e.currentTarget.closest('div.absolute').getBoundingClientRect(); setDragOffset({ x: e.clientX - r.left, y: e.clientY - r.top }); setDragId(n.id); }}
+                    className="px-4 py-[6px] border-b border-white/[0.03] flex justify-between items-center cursor-grab active:cursor-grabbing rounded-t-xl">
+                    <span className="text-[8px] font-medium uppercase tracking-[0.15em] text-white/20">{n.channel || n.type}</span>
+                    <div className="flex gap-1 opacity-0 group-hover:opacity-100" onMouseDown={e => e.stopPropagation()}>
+                      <button onClick={() => dupNode(n.id)} className="p-0.5 text-white/15 hover:text-white/40 transition-colors"><Copy size={9} strokeWidth={1.5}/></button>
+                      <button onClick={() => delNode(n.id)} className="p-0.5 text-white/15 hover:text-red-400/50 transition-colors"><Trash2 size={9} strokeWidth={1.5}/></button>
                     </div>
                   </div>
-                  <div className="p-4 space-y-3" onMouseDown={e => e.stopPropagation()}>
-                    <input className="bg-transparent text-sm font-medium outline-none w-full text-white/90 placeholder-gray-700" value={n.label || n.title || ''}
+
+                  {/* Body */}
+                  <div className="p-4 space-y-2.5 group" onMouseDown={e => e.stopPropagation()}>
+                    <input className="bg-transparent text-[13px] font-medium outline-none w-full text-white/80 placeholder-white/15" value={n.label || n.title || ''}
                       onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { label: e.target.value, title: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />
                     {n.type === 'action' && (
                       <>
-                        <textarea className="w-full bg-white/[0.03] p-2.5 rounded-lg text-[11px] h-14 outline-none resize-none text-gray-500 border border-white/[0.04] focus:border-white/[0.08] transition-colors" value={n.content || ''} placeholder="Message content..."
+                        <textarea className="w-full bg-white/[0.02] p-2.5 rounded-lg text-[11px] h-14 outline-none resize-none text-white/30 border border-white/[0.03] focus:border-white/[0.06] transition-colors placeholder-white/10" value={n.content || ''} placeholder="Message content..."
                           onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { content: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />
                         <div>
-                          <div className="text-[8px] font-medium uppercase tracking-wider text-gray-700 mb-1">Preview URL</div>
-                          <div className="flex items-center bg-white/[0.03] border border-white/[0.04] rounded-lg overflow-hidden focus-within:border-white/[0.08] transition-colors">
-                            <div className="pl-2 text-gray-700"><LinkIcon size={9}/></div>
-                            <input className="flex-1 bg-transparent p-2 text-[10px] text-gray-400 outline-none placeholder-gray-700" placeholder="Paste link..." value={n.previewLink || ''}
+                          <div className="text-[7px] uppercase tracking-[0.15em] text-white/15 mb-1">Preview URL</div>
+                          <div className="flex items-center bg-white/[0.02] border border-white/[0.03] rounded-lg overflow-hidden focus-within:border-white/[0.06] transition-colors">
+                            <div className="pl-2 text-white/15"><LinkIcon size={8} strokeWidth={1.5}/></div>
+                            <input className="flex-1 bg-transparent p-2 text-[10px] text-white/30 outline-none placeholder-white/10" placeholder="Paste link..." value={n.previewLink || ''}
                               onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { previewLink: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />
                           </div>
-                          {n.previewLink?.trim() && <a href={n.previewLink.startsWith('http') ? n.previewLink : `https://${n.previewLink}`} target="_blank" rel="noopener noreferrer" className="mt-1.5 block w-full bg-white/[0.05] hover:bg-white/[0.08] text-gray-500 hover:text-white py-1.5 rounded-lg text-[9px] font-medium text-center transition-all">Preview ↗</a>}
+                          {n.previewLink?.trim() && <a href={n.previewLink.startsWith('http') ? n.previewLink : `https://${n.previewLink}`} target="_blank" rel="noopener noreferrer" className="mt-1.5 block w-full bg-white/[0.03] hover:bg-white/[0.06] text-white/25 hover:text-white/50 py-1.5 rounded-lg text-[8px] font-medium text-center transition-all">Preview ↗</a>}
                         </div>
                       </>
                     )}
-                    {n.type === 'split' && <input className="w-full bg-white/[0.03] p-2 rounded-lg text-[10px] text-gray-500 outline-none border border-white/[0.04] focus:border-white/[0.08]" placeholder="Condition..." value={n.condition || ''}
+                    {n.type === 'split' && <input className="w-full bg-white/[0.02] p-2 rounded-lg text-[10px] text-white/30 outline-none border border-white/[0.03] focus:border-white/[0.06] placeholder-white/10" placeholder="Condition..." value={n.condition || ''}
                       onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { condition: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />}
                     {n.type === 'delay' && (
                       <div className="flex gap-2">
-                        <input type="number" className="w-1/2 bg-white/[0.03] p-2 rounded-lg text-xs text-white border border-white/[0.04] outline-none focus:border-white/[0.08]" value={n.value || ''}
+                        <input type="number" className="w-1/2 bg-white/[0.02] p-2 rounded-lg text-xs text-white/60 border border-white/[0.03] outline-none focus:border-white/[0.06]" value={n.value || ''}
                           onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { value: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />
-                        <select className="w-1/2 bg-white/[0.03] p-2 rounded-lg text-[10px] text-gray-500 border border-white/[0.04] outline-none cursor-pointer" value={n.unit || 'Hours'}
+                        <select className="w-1/2 bg-white/[0.02] p-2 rounded-lg text-[10px] text-white/30 border border-white/[0.03] outline-none cursor-pointer" value={n.unit || 'Hours'}
                           onChange={e => updateNode(n.id, { unit: e.target.value }, true)}>
                           <option>Minutes</option><option>Hours</option><option>Days</option>
                         </select>
                       </div>
                     )}
                   </div>
+
+                  {/* Port */}
                   <div className="absolute -bottom-2 left-0 w-full flex justify-center z-30 pointer-events-none">
-                    <div className="pointer-events-auto relative group flex items-center justify-center bg-[#1a1a1a] border border-white/[0.06] rounded-full h-5 hover:h-6 hover:px-0.5 transition-all cursor-pointer">
+                    <div className="pointer-events-auto relative group flex items-center justify-center bg-[#181818] border border-white/[0.05] rounded-full h-[18px] hover:h-5 hover:px-0.5 transition-all cursor-pointer">
                       {n.type === 'split' ? (
                         <>
-                          <div className="w-5 h-full flex items-center justify-center text-gray-600 group-hover:hidden"><Plus size={12} strokeWidth={2}/></div>
+                          <div className="w-4 h-full flex items-center justify-center text-white/20 group-hover:hidden"><Plus size={10} strokeWidth={1.5}/></div>
                           <div className="hidden group-hover:flex gap-0.5">
-                            <button onMouseDown={e => startLink(e, n.id, 'true')} className="w-4 h-4 rounded-full bg-green-500/15 text-green-400 hover:bg-green-500 hover:text-white flex items-center justify-center transition-all"><Check size={10} strokeWidth={3}/></button>
-                            <button onMouseDown={e => startLink(e, n.id, 'false')} className="w-4 h-4 rounded-full bg-red-500/15 text-red-400 hover:bg-red-500 hover:text-white flex items-center justify-center transition-all"><X size={10} strokeWidth={3}/></button>
+                            <button onMouseDown={e => startLink(e, n.id, 'true')} className="w-3.5 h-3.5 rounded-full bg-green-500/10 text-green-400/60 hover:bg-green-500 hover:text-white flex items-center justify-center transition-all"><Check size={8} strokeWidth={3}/></button>
+                            <button onMouseDown={e => startLink(e, n.id, 'false')} className="w-3.5 h-3.5 rounded-full bg-red-500/10 text-red-400/60 hover:bg-red-500 hover:text-white flex items-center justify-center transition-all"><X size={8} strokeWidth={3}/></button>
                           </div>
                         </>
                       ) : (
-                        <button onMouseDown={e => startLink(e, n.id, 'default')} className="w-5 h-full flex items-center justify-center text-gray-600 hover:text-blue-400 transition-colors"><Plus size={12} strokeWidth={2}/></button>
+                        <button onMouseDown={e => startLink(e, n.id, 'default')} className="w-4 h-full flex items-center justify-center text-white/20 hover:text-blue-400/60 transition-colors"><Plus size={10} strokeWidth={1.5}/></button>
                       )}
                     </div>
                   </div>
@@ -565,8 +479,15 @@ export default function App() {
           })}
         </div>
       </main>
-      <style>{`@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }`}</style>
+      <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
     </div>
   );
 }
-const TB = ({ icon, onClick }) => <button onClick={onClick} className="p-2 text-gray-600 hover:text-white hover:bg-white/[0.06] rounded-md transition-all active:scale-95">{icon}</button>;
+
+// Toolbar button with tooltip
+const TBtn = ({ icon, label, onClick }) => (
+  <div className="relative group">
+    <button onClick={onClick} className="p-[7px] text-white/20 hover:text-white/60 hover:bg-white/[0.04] rounded-md transition-all active:scale-95">{icon}</button>
+    <div className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 px-2 py-1 bg-[#222] text-[8px] text-white/60 rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity duration-150">{label}</div>
+  </div>
+);
