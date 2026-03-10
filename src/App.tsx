@@ -46,12 +46,11 @@ const INITIAL_JOURNEYS = [
   { id: 'j14', title: 'Flash Sale', desc: 'Mass-scale promotion.' }
 ];
 
-// Adjusted starting coordinates for the pure top-left coordinate system
 const INITIAL_NODES = {
   'j1': [
     { id: 'n1', type: 'trigger', x: 250, y: 80, label: 'Checkout Abandoned' },
     { id: 'n2', type: 'action', channel: 'WhatsApp', x: 250, y: 240, title: 'Main Nudge', content: 'Hi {{name}}, your cart is waiting!', previewLink: '' },
-    { id: 'n3', type: 'split', x: 250, y: 520, condition: 'Did customer click link?' }
+    { id: 'n3', type: 'split', x: 250, y: 560, condition: 'Did customer click link?' }
   ]
 };
 
@@ -141,7 +140,7 @@ export default function App() {
       executeSync(jList, nData, eData);
     } else {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 600);
+      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 300);
     }
   };
 
@@ -208,7 +207,7 @@ export default function App() {
       id, type, x: 250, y: 150,
       ...(type === 'action' ? { channel: chan, title: `New ${chan}`, content: '', previewLink: '' } : {}),
       ...(type === 'delay' ? { value: 1, unit: 'Hours' } : {}),
-      ...(type === 'split' ? { condition: 'Logic Condition' } : {})
+      ...(type === 'split' ? { condition: '' } : {})
     };
     const nD = { ...nodeData, [activeJId]: [...(nodeData[activeJId] || []), newNode] };
     setNodeData(nD);
@@ -270,10 +269,21 @@ export default function App() {
     setLinking(null);
   };
 
-  // --- SVG PATH MATH (Top-Left Absolute Coordinate Sync) ---
+  // --- SVG PATH MATH (Dynamic Height Calculation) ---
+  const getNodeHeight = (node: any) => {
+    if (node.type === 'trigger') return 100;
+    if (node.type === 'split') return 110;
+    if (node.type === 'delay') return 110;
+    if (node.type === 'action') {
+       return (node.previewLink && node.previewLink.trim() !== '') ? 280 : 240;
+    }
+    return 150;
+  };
+
   const calculatePath = (x1: number, y1: number, x2: number, y2: number) => {
-    // Elegant Bezier curve from start point to end point
-    return `M ${x1} ${y1} C ${x1} ${y1 + 100}, ${x2} ${y2 - 100}, ${x2} ${y2}`;
+    // Dynamic curve prevents looping when nodes are close
+    const curve = Math.max(60, Math.abs(y2 - y1) / 2);
+    return `M ${x1} ${y1} C ${x1} ${y1 + curve}, ${x2} ${y2 - curve}, ${x2} ${y2}`;
   };
 
   const nodes = nodeData[activeJId] || [];
@@ -313,7 +323,20 @@ export default function App() {
         <div className="p-4 border-t border-white/10 bg-[#1c1c1e]">
            {showAuthInput && !isAdmin && (
              <div className="mb-3 flex gap-2 animate-in fade-in zoom-in-95">
-               <input type="password" placeholder="Passcode..." className="flex-1 bg-black border border-white/10 rounded-lg px-3 py-2 text-[11px] text-white outline-none focus:border-[#0A84FF]" value={authInput} onChange={e => setAuthInput(e.target.value)} onKeyDown={e => e.key === 'Enter' && authInput === 'admin2024' && (setIsAdmin(true), setShowAuthInput(false))} />
+               <input 
+                 type="password" 
+                 placeholder="Passcode..." 
+                 className="flex-1 bg-black border border-white/10 rounded-lg px-3 py-2 text-[11px] text-white outline-none focus:border-[#0A84FF]" 
+                 value={authInput} 
+                 onChange={e => setAuthInput(e.target.value)} 
+                 onKeyDown={e => e.key === 'Enter' && authInput === 'admin2024' && (setIsAdmin(true), setShowAuthInput(false))} 
+               />
+               <button 
+                 onClick={() => { if (authInput === 'admin2024') { setIsAdmin(true); setShowAuthInput(false); } }} 
+                 className="bg-[#0A84FF] px-3 py-2 rounded-lg text-[10px] font-bold text-white shadow-lg transition-colors hover:bg-blue-600"
+               >
+                 GO
+               </button>
              </div>
            )}
            <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 text-[9px] font-bold uppercase tracking-widest text-gray-500 hover:text-white transition-all">
@@ -363,24 +386,20 @@ export default function App() {
               const to = nodes.find((n: any) => n.id === e.to);
               if (!from || !to) return null;
               
-              // Absolute top-left coordinate math for infallible lines
               const portOffset = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
               const x1 = from.x + 140 + portOffset;
               
-              // Deep anchoring: Anchor the line 60px down from the top of the box.
-              // Since the box is opaque, the line hides behind it and naturally emerges from the bottom edge regardless of the box's dynamic height!
-              const y1 = from.y + 60; 
+              // DYNAMIC HEIGHT: We calculate the actual node height to guarantee the line drops from the very bottom.
+              const y1 = from.y + getNodeHeight(from) - 10; 
               
               const x2 = to.x + 140;
-              const y2 = to.y + 20; // Anchored slightly inside the top of the target box
+              const y2 = to.y + 20; 
               
               const color = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#5E5E62';
 
-              // Calculate position at 75% down the cubic bezier curve to ensure it clears the opaque box
-              const t = 0.75;
-              const u = 1 - t;
-              const btnX = (u * u * u) * x1 + 3 * (u * u) * t * x1 + 3 * u * (t * t) * x2 + (t * t * t) * x2;
-              const btnY = (u * u * u) * y1 + 3 * (u * u) * t * (y1 + 100) + 3 * u * (t * t) * (y2 - 100) + (t * t * t) * y2;
+              // Since the curve is symmetric, evaluating t=0.5 exactly gives the halfway point.
+              const midX = (x1 + x2) / 2;
+              const midY = (y1 + y2) / 2;
 
               return (
                 <g key={e.id}>
@@ -397,19 +416,21 @@ export default function App() {
                     }}
                   >
                     {/* Massive invisible hitbox for easy clicking */}
-                    <circle cx={btnX} cy={btnY} r="24" fill="transparent" />
+                    <circle cx={midX} cy={midY} r="24" fill="transparent" />
                     {/* Visible button UI */}
-                    <circle cx={btnX} cy={btnY} r="12" fill="#1c1c1e" stroke={color} strokeWidth="2" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
-                    <text x={btnX} y={btnY + 4} textAnchor="middle" fontSize="14" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
+                    <circle cx={midX} cy={midY} r="12" fill="#1c1c1e" stroke={color} strokeWidth="2" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
+                    <text x={midX} y={midY + 4} textAnchor="middle" fontSize="14" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
                   </g>
                 </g>
               );
             })}
+            
+            {/* ACTIVE DRAWING WIRE */}
             {linking && (
                <path 
                  d={calculatePath(
                    nodes.find((n: any) => n.id === linking.fromId).x + 140 + (linking.portType === 'true' ? -40 : linking.portType === 'false' ? 40 : 0), 
-                   nodes.find((n: any) => n.id === linking.fromId).y + 60, 
+                   nodes.find((n: any) => n.id === linking.fromId).y + getNodeHeight(nodes.find((n: any) => n.id === linking.fromId)) - 10, 
                    mousePos.x, mousePos.y
                  )} 
                  stroke="#0A84FF" strokeWidth="2" strokeDasharray="6,6" fill="none" 
@@ -417,6 +438,7 @@ export default function App() {
             )}
           </svg>
 
+          {/* RENDER NODES */}
           {nodes.map((n: any) => (
             <div key={n.id} className="absolute z-20" style={{ left: n.x, top: n.y }}>
               <div 
@@ -452,17 +474,34 @@ export default function App() {
 
                 {/* CONTENT INPUTS */}
                 <div className="p-6 space-y-4" onMouseDown={e => e.stopPropagation()}>
-                   <input className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" value={n.label || n.title} onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value })} />
+                   <input 
+                     className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" 
+                     value={n.label || n.title} 
+                     onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value })} 
+                     onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                   />
                    
                    {n.type === 'action' && (
                      <>
-                        <textarea className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" value={n.content} placeholder="Message content..." onChange={e => updateNodeLocal(n.id, { content: e.target.value })} />
+                        <textarea 
+                          className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" 
+                          value={n.content} 
+                          placeholder="Message content..." 
+                          onChange={e => updateNodeLocal(n.id, { content: e.target.value })} 
+                          onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                        />
                         
                         <div className="flex flex-col gap-1 mt-1 text-left">
                            <span className="text-[8px] font-black uppercase tracking-widest text-gray-600">Preview / Media URL</span>
                            <div className="flex items-center bg-black/40 border border-white/5 rounded-xl overflow-hidden focus-within:border-[#0A84FF]/40 transition-colors">
                               <div className="pl-2 text-gray-600"><LinkIcon size={10} /></div>
-                              <input className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" placeholder="Paste link..." value={n.previewLink || ''} onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value })} />
+                              <input 
+                                className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" 
+                                placeholder="Paste link..." 
+                                value={n.previewLink || ''} 
+                                onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value })} 
+                                onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                              />
                            </div>
                            {n.previewLink && n.previewLink.trim() !== '' && (
                               <a href={n.previewLink.startsWith('http') ? n.previewLink : `https://${n.previewLink}`} target="_blank" rel="noopener noreferrer" className="mt-1 w-full bg-[#0A84FF]/80 hover:bg-[#0A84FF] text-white py-1.5 rounded-xl text-[10px] font-black uppercase flex items-center justify-center gap-1.5 shadow-lg transition-all">Test / Preview ↗</a>
@@ -471,12 +510,28 @@ export default function App() {
                      </>
                    )}
                    {n.type === 'split' && (
-                      <input className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" placeholder="Enter condition..." value={n.condition} onChange={e => updateNodeLocal(n.id, { condition: e.target.value })} />
+                      <input 
+                        className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" 
+                        placeholder="Enter condition..." 
+                        value={n.condition} 
+                        onChange={e => updateNodeLocal(n.id, { condition: e.target.value })} 
+                        onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                      />
                    )}
                    {n.type === 'delay' && (
                       <div className="flex gap-2">
-                        <input type="number" className="w-1/2 bg-black/40 p-2 rounded-xl text-xs font-bold text-white border border-white/5 outline-none focus:border-[#0A84FF]" value={n.value} onChange={e => updateNodeLocal(n.id, { value: e.target.value })} />
-                        <select className="w-1/2 bg-black/40 p-2 rounded-xl text-[10px] font-black text-gray-500 border border-white/5 outline-none cursor-pointer" value={n.unit} onChange={e => { updateNodeLocal(n.id, { unit: e.target.value }); syncToCloud(journeysList, nodeData, edgeData, true); }}>
+                        <input 
+                          type="number" 
+                          className="w-1/2 bg-black/40 p-2 rounded-xl text-xs font-bold text-white border border-white/5 outline-none focus:border-[#0A84FF]" 
+                          value={n.value} 
+                          onChange={e => updateNodeLocal(n.id, { value: e.target.value })} 
+                          onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                        />
+                        <select 
+                          className="w-1/2 bg-black/40 p-2 rounded-xl text-[10px] font-black text-gray-500 border border-white/5 outline-none cursor-pointer" 
+                          value={n.unit} 
+                          onChange={e => { updateNodeLocal(n.id, { unit: e.target.value }); syncToCloud(journeysList, nodeData, edgeData, true); }}
+                        >
                            <option>Minutes</option><option>Hours</option><option>Days</option>
                         </select>
                       </div>
