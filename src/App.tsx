@@ -2,7 +2,7 @@ import React, { useState, useRef, useMemo, useEffect } from 'react';
 import { 
   MessageSquare, Phone, Clock, Zap, Trash2, GitBranch, 
   Smartphone, MessageCircleMore, Plus, GripVertical, 
-  Check, X, Edit2, Link as LinkIcon, ExternalLink, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle
+  Check, X, Edit2, Link as LinkIcon, ExternalLink, Lock, Unlock, Save, RefreshCw, Copy, AlertTriangle, Loader2
 } from 'lucide-react';
 
 // --- 1. SECURE FIREBASE CONNECTION ---
@@ -67,9 +67,13 @@ export default function App() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [cloudStatus, setCloudStatus] = useState('CONNECTING...');
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [isInitialized, setIsInitialized] = useState(false);
 
   const [journeysList, setJourneysList] = useState<any[]>(INITIAL_JOURNEYS);
-  const [activeJId, setActiveJId] = useState('j1');
+  
+  // Persist Active Journey in Local Storage to survive refreshes
+  const [activeJId, setActiveJId] = useState(() => localStorage.getItem('cw_active_journey') || 'j1');
+  
   const [nodeData, setNodeData] = useState<any>(INITIAL_NODES);
   const [edgeData, setEdgeData] = useState<any>(INITIAL_EDGES);
   
@@ -80,19 +84,24 @@ export default function App() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   
   const isDraggingRef = useRef(false);
+  const isTypingRef = useRef(false); // Prevents cloud from overwriting while typing
   const debounceTimer = useRef<any>(null);
 
   const [showAuthInput, setShowAuthInput] = useState(false);
   const [authInput, setAuthInput] = useState('');
 
-  // 1. Auth Init
+  // 1. Auth Init & Save active tab
   useEffect(() => {
     signInAnonymously(auth).catch(() => setCloudStatus('AUTH ERROR'));
     const unsubscribe = onAuthStateChanged(auth, setUser);
     return () => unsubscribe();
   }, []);
 
-  // 2. Sync Listener
+  useEffect(() => {
+    localStorage.setItem('cw_active_journey', activeJId);
+  }, [activeJId]);
+
+  // 2. Sync Listener with Race Condition Guards
   useEffect(() => {
     if (!user) return;
     setCloudStatus('SYNCING...');
@@ -101,7 +110,8 @@ export default function App() {
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        if (!isDraggingRef.current && !linking) {
+        // SAFEGUARD: Only apply cloud data if user isn't actively modifying data locally
+        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking && !isTypingRef.current) {
           setJourneysList(data.journeysList || INITIAL_JOURNEYS);
           setNodeData(data.nodeData || INITIAL_NODES);
           setEdgeData(data.edgeData || INITIAL_EDGES);
@@ -111,9 +121,11 @@ export default function App() {
       } else {
         syncToCloud(INITIAL_JOURNEYS, INITIAL_NODES, INITIAL_EDGES, true);
       }
+      setIsInitialized(true); // Unlock UI
     }, () => {
       setCloudStatus('OFFLINE');
       setConnectionError('Check Firebase: Anonymous Auth must be enabled.');
+      setIsInitialized(true);
     });
 
     return () => unsubscribe();
@@ -234,7 +246,7 @@ export default function App() {
   const updateNodeLocal = (id: string, upd: any) => {
     const nD = { ...nodeData, [activeJId]: (nodeData[activeJId] || []).map((n: any) => n.id === id ? { ...n, ...upd } : n) };
     setNodeData(nD);
-    syncToCloud(journeysList, nD, edgeData, false); // Debounced save for typing
+    syncToCloud(journeysList, nD, edgeData, false);
   };
 
   // --- DRAG & LINK LOGIC ---
@@ -269,7 +281,7 @@ export default function App() {
     setLinking(null);
   };
 
-  // --- SVG PATH MATH (Dynamic Height Calculation) ---
+  // --- SVG PATH MATH (Dynamic Height & Bezier Placement) ---
   const getNodeHeight = (node: any) => {
     if (node.type === 'trigger') return 100;
     if (node.type === 'split') return 110;
@@ -281,7 +293,6 @@ export default function App() {
   };
 
   const calculatePath = (x1: number, y1: number, x2: number, y2: number) => {
-    // Dynamic curve prevents looping when nodes are close
     const curve = Math.max(60, Math.abs(y2 - y1) / 2);
     return `M ${x1} ${y1} C ${x1} ${y1 + curve}, ${x2} ${y2 - curve}, ${x2} ${y2}`;
   };
@@ -289,6 +300,16 @@ export default function App() {
   const nodes = nodeData[activeJId] || [];
   const edges = edgeData[activeJId] || [];
   const activeJourney = journeysList.find(j => j.id === activeJId);
+
+  // Blocking render until cloud state is loaded to prevent overrides
+  if (!isInitialized) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-black text-white flex-col gap-4">
+         <Loader2 className="animate-spin text-[#0A84FF]" size={40} />
+         <p className="text-sm font-bold uppercase tracking-widest text-gray-500">Loading Workspace...</p>
+      </div>
+    );
+  }
 
   return (
     <div className="flex h-screen bg-black text-gray-100 font-sans overflow-hidden select-none" onMouseMove={handleMouseMove}>
@@ -389,17 +410,21 @@ export default function App() {
               const portOffset = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
               const x1 = from.x + 140 + portOffset;
               
-              // DYNAMIC HEIGHT: We calculate the actual node height to guarantee the line drops from the very bottom.
+              // DYNAMIC HEIGHT: Anchor line slightly inside bottom of box
               const y1 = from.y + getNodeHeight(from) - 10; 
               
               const x2 = to.x + 140;
               const y2 = to.y + 20; 
               
               const color = e.port === 'true' ? '#32D74B' : e.port === 'false' ? '#FF453A' : '#5E5E62';
+              const curve = Math.max(60, Math.abs(y2 - y1) / 2);
 
-              // Since the curve is symmetric, evaluating t=0.5 exactly gives the halfway point.
-              const midX = (x1 + x2) / 2;
-              const midY = (y1 + y2) / 2;
+              // CUBIC BEZIER CALCULATION FOR PERFECT VISIBILITY
+              // Pushing the "X" button 70% down the curve guarantees it clears the bottom of the source box
+              const t = 0.70;
+              const u = 1 - t;
+              const btnX = (u * u * u) * x1 + 3 * (u * u) * t * x1 + 3 * u * (t * t) * x2 + (t * t * t) * x2;
+              const btnY = (u * u * u) * y1 + 3 * (u * u) * t * (y1 + curve) + 3 * u * (t * t) * (y2 - curve) + (t * t * t) * y2;
 
               return (
                 <g key={e.id}>
@@ -415,11 +440,11 @@ export default function App() {
                        syncToCloud(journeysList, nodeData, nED, true);
                     }}
                   >
-                    {/* Massive invisible hitbox for easy clicking */}
-                    <circle cx={midX} cy={midY} r="24" fill="transparent" />
+                    {/* Massive invisible hitbox */}
+                    <circle cx={btnX} cy={btnY} r="24" fill="transparent" />
                     {/* Visible button UI */}
-                    <circle cx={midX} cy={midY} r="12" fill="#1c1c1e" stroke={color} strokeWidth="2" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
-                    <text x={midX} y={midY + 4} textAnchor="middle" fontSize="14" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
+                    <circle cx={btnX} cy={btnY} r="12" fill="#1c1c1e" stroke={color} strokeWidth="2" className="group-hover:fill-red-900/50 group-hover:stroke-red-500 transition-all" />
+                    <text x={btnX} y={btnY + 4} textAnchor="middle" fontSize="14" fill={color} className="font-bold pointer-events-none group-hover:fill-red-500 transition-all">×</text>
                   </g>
                 </g>
               );
@@ -477,8 +502,9 @@ export default function App() {
                    <input 
                      className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" 
                      value={n.label || n.title} 
+                     onFocus={() => { isTypingRef.current = true; }}
                      onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value })} 
-                     onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                     onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
                    />
                    
                    {n.type === 'action' && (
@@ -487,8 +513,9 @@ export default function App() {
                           className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" 
                           value={n.content} 
                           placeholder="Message content..." 
+                          onFocus={() => { isTypingRef.current = true; }}
                           onChange={e => updateNodeLocal(n.id, { content: e.target.value })} 
-                          onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                          onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
                         />
                         
                         <div className="flex flex-col gap-1 mt-1 text-left">
@@ -499,8 +526,9 @@ export default function App() {
                                 className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" 
                                 placeholder="Paste link..." 
                                 value={n.previewLink || ''} 
+                                onFocus={() => { isTypingRef.current = true; }}
                                 onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value })} 
-                                onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                                onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
                               />
                            </div>
                            {n.previewLink && n.previewLink.trim() !== '' && (
@@ -514,8 +542,9 @@ export default function App() {
                         className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" 
                         placeholder="Enter condition..." 
                         value={n.condition} 
+                        onFocus={() => { isTypingRef.current = true; }}
                         onChange={e => updateNodeLocal(n.id, { condition: e.target.value })} 
-                        onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                        onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
                       />
                    )}
                    {n.type === 'delay' && (
@@ -524,8 +553,9 @@ export default function App() {
                           type="number" 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-xs font-bold text-white border border-white/5 outline-none focus:border-[#0A84FF]" 
                           value={n.value} 
+                          onFocus={() => { isTypingRef.current = true; }}
                           onChange={e => updateNodeLocal(n.id, { value: e.target.value })} 
-                          onBlur={() => syncToCloud(journeysList, nodeData, edgeData, true)}
+                          onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
                         />
                         <select 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-[10px] font-black text-gray-500 border border-white/5 outline-none cursor-pointer" 
@@ -564,8 +594,10 @@ export default function App() {
       </main>
       
       <style>{`
-        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar { width: 5px; height: 5px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
         .custom-scrollbar::-webkit-scrollbar-thumb { background-color: #333; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background-color: #444; }
       `}</style>
     </div>
   );
