@@ -88,6 +88,7 @@ export default function App() {
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const isDraggingRef = useRef(false);
   const [linking, setLinking] = useState(null);
+  const linkingRef = useRef(null); // mirrors linking state for global mouseup
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   const isTypingRef = useRef(false);
   const isSyncing = useRef(false);
@@ -183,11 +184,17 @@ export default function App() {
 
   useEffect(() => {
     const up = () => {
+      // Commit drag position
       if (dragId && dragPos) {
         setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y } : n) }; latest.current.n = nd; return nd; });
         triggerSync(true); isDraggingRef.current = false;
       }
-      setDragId(null); setDragPos(null); setLinking(null);
+      setDragId(null); setDragPos(null);
+      
+      // DON'T blindly clear linking here — let onMouseUp on nodes handle it via endLink.
+      // But if mouse was released on empty canvas (no node caught it), clear it.
+      // We use a small delay so the node's onMouseUp fires first.
+      setTimeout(() => { if (linkingRef.current) { setLinking(null); linkingRef.current = null; } }, 50);
     };
     window.addEventListener('mouseup', up); return () => window.removeEventListener('mouseup', up);
   }, [dragId, dragPos, dragOffset, activeJId, triggerSync]);
@@ -250,8 +257,15 @@ export default function App() {
   const delNode = (id) => { setNodes(p => { const nd = { ...p, [activeJId]: (p[activeJId] || []).filter(n => n.id !== id) }; latest.current.n = nd; return nd; }); setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.from !== id && e.to !== id) }; latest.current.e = ed; triggerSync(true); return ed; }); };
   const updateNode = (id, upd, force = false) => { setNodes(p => { const nd = { ...p, [activeJId]: (p[activeJId] || []).map(n => n.id === id ? { ...n, ...upd } : n) }; latest.current.n = nd; triggerSync(force); return nd; }); };
 
-  const startLink = (e, id, port) => { e.stopPropagation(); e.preventDefault(); setLinking({ fromId: id, port }); };
-  const endLink = (tid) => { if (linking && linking.fromId !== tid) { const ne = { id: `e-${Date.now()}`, from: linking.fromId, to: tid, port: linking.port }; setEdges(p => { const ed = { ...p, [activeJId]: [...(p[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; }); } setLinking(null); };
+  const startLink = (e, id, port) => { e.stopPropagation(); e.preventDefault(); const lnk = { fromId: id, port }; setLinking(lnk); linkingRef.current = lnk; };
+  const endLink = (tid) => {
+    const lnk = linkingRef.current;
+    if (lnk && lnk.fromId !== tid) {
+      const ne = { id: `e-${Date.now()}`, from: lnk.fromId, to: tid, port: lnk.port };
+      setEdges(p => { const ed = { ...p, [activeJId]: [...(p[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; });
+    }
+    setLinking(null); linkingRef.current = null;
+  };
   const delEdge = (eid) => { setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; }); };
 
   const onCanvasMove = (e) => {
@@ -268,7 +282,15 @@ export default function App() {
     return { x: node.x, y: node.y };
   }, [dragId, dragPos, dragOffset]);
 
-  const getH = (n) => { if (n.type === 'trigger') return 90; if (n.type === 'split') return 140; if (n.type === 'delay') return 110; if (n.type === 'action') return (n.previewLink?.trim()) ? 240 : 180; return 140; };
+  // Node heights must match actual rendered size (header + body + padding)
+  // Header: py-[6px]*2 + text = ~26px. Body: p-4 = 16px*2 + content.
+  const getH = (n) => {
+    if (n.type === 'trigger') return 82;   // header(26) + body(32+24)
+    if (n.type === 'split') return 120;    // header(26) + body(32+22+10+30)
+    if (n.type === 'delay') return 112;    // header(26) + body(32+22+10+22)
+    if (n.type === 'action') return (n.previewLink?.trim()) ? 260 : 215; // textarea+url+maybe preview btn
+    return 120;
+  };
   const svgPath = (x1, y1, x2, y2) => { const c = Math.max(60, Math.abs(y2 - y1) / 2); return `M${x1},${y1} C${x1},${y1 + c} ${x2},${y2 - c} ${x2},${y2}`; };
   // True bezier midpoint at t=0.5
   const bezMid = (x1, y1, x2, y2) => {
@@ -425,7 +447,7 @@ export default function App() {
               if (!fN || !tN) return null;
               const fp = getPos(fN), tp = getPos(tN);
               const off = e.port === 'true' ? -40 : e.port === 'false' ? 40 : 0;
-              const x1 = fp.x + 140 + off, y1 = fp.y + getH(fN), x2 = tp.x + 140, y2 = tp.y + 8;
+              const x1 = fp.x + 140 + off, y1 = fp.y + getH(fN), x2 = tp.x + 140, y2 = tp.y;
               const col = e.port === 'true' ? '#22C55E' : e.port === 'false' ? '#EF4444' : '#666';
               const mid = bezMid(x1, y1, x2, y2);
               const isHovered = hoveredEdge === e.id;
@@ -433,11 +455,11 @@ export default function App() {
                 <g key={e.id}>
                   {/* Visible line */}
                   <path d={svgPath(x1, y1, x2, y2)} stroke={col} strokeWidth={isHovered ? "2.5" : "2"} fill="none" opacity={isHovered ? "0.8" : "0.5"} style={{ transition: 'opacity 0.15s, stroke-width 0.15s' }} />
-                  {/* Wide invisible hover target */}
-                  <path d={svgPath(x1, y1, x2, y2)} stroke="transparent" strokeWidth="24" fill="none" className="pointer-events-auto" style={{ cursor: 'pointer' }}
-                    onMouseEnter={() => setHoveredEdge(e.id)} onMouseLeave={() => setHoveredEdge(null)} />
+                  {/* Wide invisible hover target — disabled during linking */}
+                  {!linking && <path d={svgPath(x1, y1, x2, y2)} stroke="transparent" strokeWidth="24" fill="none" className="pointer-events-auto" style={{ cursor: 'pointer' }}
+                    onMouseEnter={() => setHoveredEdge(e.id)} onMouseLeave={() => setHoveredEdge(null)} />}
                   {/* Delete button — only visible on hover */}
-                  {isHovered && (
+                  {isHovered && !linking && (
                     <g className="pointer-events-auto" style={{ cursor: 'pointer' }}
                       onPointerDown={ev => { ev.stopPropagation(); delEdge(e.id); setHoveredEdge(null); }}
                       onMouseEnter={() => setHoveredEdge(e.id)}>
@@ -460,8 +482,12 @@ export default function App() {
           {/* NODES */}
           {curNodes.map(n => {
             const pos = getPos(n);
+            const isLinkTarget = linking && linking.fromId !== n.id;
             return (
-              <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}>
+              <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}
+                onMouseUp={() => { if (isLinkTarget) endLink(n.id); }}>
+                {/* Expanded invisible hit area during linking */}
+                {isLinkTarget && <div className="absolute -inset-4 z-30" onMouseUp={() => endLink(n.id)} />}
                 <div onMouseUp={() => endLink(n.id)}
                   className={`w-[280px] rounded-xl border transition-colors duration-150 ${
                     dragId === n.id ? 'border-white/[0.08] z-50' : linking && linking.fromId !== n.id ? 'border-blue-500/20 z-40' : 'border-white/[0.04] hover:border-white/[0.06] z-20'
