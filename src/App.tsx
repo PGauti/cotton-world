@@ -8,7 +8,7 @@ import {
 // --- 1. SECURE FIREBASE CONNECTION ---
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: "AIzaSyCZE3aHBH2yZLMuOge5FaJycXc0zIQm15k",
@@ -84,7 +84,6 @@ export default function App() {
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
   
   const isDraggingRef = useRef(false);
-  const isTypingRef = useRef(false); // Prevents cloud from overwriting while typing
   const debounceTimer = useRef<any>(null);
 
   const [showAuthInput, setShowAuthInput] = useState(false);
@@ -110,8 +109,10 @@ export default function App() {
     const unsubscribe = onSnapshot(docRef, (docSnap) => {
       if (docSnap.exists()) {
         const data = docSnap.data();
-        // SAFEGUARD: Only apply cloud data if user isn't actively modifying data locally
-        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking && !isTypingRef.current) {
+        
+        // SAFEGUARD: Only apply incoming cloud data if we aren't the ones currently making the changes.
+        // Removed `isTypingRef` because it caused the app to drop fast writes.
+        if (!docSnap.metadata.hasPendingWrites && !isDraggingRef.current && !linking) {
           setJourneysList(data.journeysList || INITIAL_JOURNEYS);
           setNodeData(data.nodeData || INITIAL_NODES);
           setEdgeData(data.edgeData || INITIAL_EDGES);
@@ -121,7 +122,7 @@ export default function App() {
       } else {
         syncToCloud(INITIAL_JOURNEYS, INITIAL_NODES, INITIAL_EDGES, true);
       }
-      setIsInitialized(true); // Unlock UI
+      setIsInitialized(true); // Unlock UI only after data is loaded
     }, () => {
       setCloudStatus('OFFLINE');
       setConnectionError('Check Firebase: Anonymous Auth must be enabled.');
@@ -136,7 +137,7 @@ export default function App() {
     const handleGlobalMouseUp = () => {
       if (dragNode || linking) {
         isDraggingRef.current = false;
-        if (dragNode) syncToCloud(journeysList, nodeData, edgeData, true);
+        if (dragNode) syncToCloud(journeysList, nodeData, edgeData, true); // Force position save
       }
       setDragNode(null);
       setLinking(null);
@@ -149,10 +150,11 @@ export default function App() {
   const syncToCloud = (jList: any, nData: any, eData: any, force = false) => {
     if (!user) return;
     if (force) {
+      if (debounceTimer.current) clearTimeout(debounceTimer.current);
       executeSync(jList, nData, eData);
     } else {
       if (debounceTimer.current) clearTimeout(debounceTimer.current);
-      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 300);
+      debounceTimer.current = setTimeout(() => executeSync(jList, nData, eData), 500);
     }
   };
 
@@ -167,6 +169,51 @@ export default function App() {
       setCloudStatus('LIVE SYNC ACTIVE');
     } catch (e) { 
       console.error(e); 
+      setCloudStatus('SYNC ERROR');
+    }
+  };
+
+  // --- ADMIN MASTER LOCK FUNCTIONS ---
+  const handleSaveMaster = async () => {
+    if (!user || !isAdmin) return;
+    setCloudStatus('SAVING MASTER...');
+    try {
+      await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'master'), {
+        journeysList,
+        nodeData,
+        edgeData,
+        lastUpdated: new Date().toISOString()
+      });
+      setCloudStatus('MASTER SAVED');
+      setTimeout(() => setCloudStatus('LIVE SYNC ACTIVE'), 2000);
+    } catch (e) {
+      console.error(e);
+      setCloudStatus('SYNC ERROR');
+    }
+  };
+
+  const handleResetFlow = async () => {
+    if (!user || !isAdmin) return;
+    if (!window.confirm("Are you sure you want to completely overwrite the current flow with the Master Template?")) return;
+    
+    setCloudStatus('RESTORING...');
+    try {
+      const snap = await getDoc(doc(db, 'artifacts', appId, 'public', 'data', 'dashboardState', 'master'));
+      if (snap.exists()) {
+        const data = snap.data();
+        setJourneysList(data.journeysList);
+        setNodeData(data.nodeData);
+        setEdgeData(data.edgeData);
+        await executeSync(data.journeysList, data.nodeData, data.edgeData);
+      } else {
+        // If no master exists, restore to hardcoded initial state
+        setJourneysList(INITIAL_JOURNEYS);
+        setNodeData(INITIAL_NODES);
+        setEdgeData(INITIAL_EDGES);
+        await executeSync(INITIAL_JOURNEYS, INITIAL_NODES, INITIAL_EDGES);
+      }
+    } catch (e) {
+      console.error(e);
       setCloudStatus('SYNC ERROR');
     }
   };
@@ -243,10 +290,13 @@ export default function App() {
     syncToCloud(journeysList, nD, eD, true);
   };
 
-  const updateNodeLocal = (id: string, upd: any) => {
-    const nD = { ...nodeData, [activeJId]: (nodeData[activeJId] || []).map((n: any) => n.id === id ? { ...n, ...upd } : n) };
-    setNodeData(nD);
-    syncToCloud(journeysList, nD, edgeData, false);
+  // Updated to use functional state to completely eliminate the "lost edit on refresh" bug
+  const updateNodeLocal = (id: string, upd: any, forceSync = false) => {
+    setNodeData(prev => {
+      const nD = { ...prev, [activeJId]: (prev[activeJId] || []).map((n: any) => n.id === id ? { ...n, ...upd } : n) };
+      syncToCloud(journeysList, nD, edgeData, forceSync);
+      return nD;
+    });
   };
 
   // --- DRAG & LINK LOGIC ---
@@ -363,10 +413,17 @@ export default function App() {
            <button onClick={() => setShowAuthInput(!showAuthInput)} className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-white/5 text-[9px] font-bold uppercase tracking-widest text-gray-500 hover:text-white transition-all">
              {isAdmin ? <Unlock size={14}/> : <Lock size={14}/>} {isAdmin ? 'ADMIN UNLOCKED' : 'ADMIN LOGIN'}
            </button>
+           
+           {/* MASTER ADMIN CONTROLS RESTORED */}
            {isAdmin && (
-             <button onClick={() => executeSync(journeysList, nodeData, edgeData)} className="w-full mt-3 py-3 rounded-xl bg-emerald-600/20 text-emerald-400 text-[9px] font-bold uppercase tracking-widest border border-emerald-500/20 hover:bg-emerald-600 hover:text-white transition-all flex items-center justify-center gap-2">
-                <Save size={14}/> Forced Manual Sync
-             </button>
+             <div className="flex gap-2 mt-3 animate-in fade-in zoom-in-95">
+               <button onClick={handleSaveMaster} className="flex-1 py-2 rounded-xl bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600 hover:text-white text-[9px] font-bold uppercase tracking-widest border border-emerald-500/20 transition-all flex items-center justify-center gap-1.5 shadow-sm">
+                  <Save size={12}/> Save Master
+               </button>
+               <button onClick={handleResetFlow} className="flex-1 py-2 rounded-xl bg-rose-600/20 text-rose-400 hover:bg-rose-600 hover:text-white text-[9px] font-bold uppercase tracking-widest border border-rose-500/20 transition-all flex items-center justify-center gap-1.5 shadow-sm">
+                  <RefreshCw size={12}/> Reset Flow
+               </button>
+             </div>
            )}
         </div>
       </aside>
@@ -497,14 +554,13 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* CONTENT INPUTS */}
+                {/* CONTENT INPUTS - Using functional update on Blur to force hard sync */}
                 <div className="p-6 space-y-4" onMouseDown={e => e.stopPropagation()}>
                    <input 
                      className="bg-transparent text-lg font-bold outline-none w-full border-b border-transparent focus:border-white/10 text-white" 
                      value={n.label || n.title} 
-                     onFocus={() => { isTypingRef.current = true; }}
-                     onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value })} 
-                     onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
+                     onChange={e => updateNodeLocal(n.id, { label: e.target.value, title: e.target.value }, false)} 
+                     onBlur={() => updateNodeLocal(n.id, { label: n.label, title: n.title }, true)}
                    />
                    
                    {n.type === 'action' && (
@@ -513,9 +569,8 @@ export default function App() {
                           className="w-full bg-black/40 p-3 rounded-2xl text-[11px] h-18 outline-none resize-none leading-relaxed text-gray-400 italic border border-white/5 focus:border-[#0A84FF]/30 transition-all" 
                           value={n.content} 
                           placeholder="Message content..." 
-                          onFocus={() => { isTypingRef.current = true; }}
-                          onChange={e => updateNodeLocal(n.id, { content: e.target.value })} 
-                          onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
+                          onChange={e => updateNodeLocal(n.id, { content: e.target.value }, false)} 
+                          onBlur={() => updateNodeLocal(n.id, { content: n.content }, true)}
                         />
                         
                         <div className="flex flex-col gap-1 mt-1 text-left">
@@ -526,9 +581,8 @@ export default function App() {
                                 className="flex-1 bg-transparent p-2 text-[10px] text-gray-300 outline-none placeholder-gray-700" 
                                 placeholder="Paste link..." 
                                 value={n.previewLink || ''} 
-                                onFocus={() => { isTypingRef.current = true; }}
-                                onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value })} 
-                                onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
+                                onChange={e => updateNodeLocal(n.id, { previewLink: e.target.value }, false)} 
+                                onBlur={() => updateNodeLocal(n.id, { previewLink: n.previewLink }, true)}
                               />
                            </div>
                            {n.previewLink && n.previewLink.trim() !== '' && (
@@ -542,9 +596,8 @@ export default function App() {
                         className="w-full bg-black/40 p-2 rounded-xl text-[10px] text-gray-400 outline-none italic border border-white/5" 
                         placeholder="Enter condition..." 
                         value={n.condition} 
-                        onFocus={() => { isTypingRef.current = true; }}
-                        onChange={e => updateNodeLocal(n.id, { condition: e.target.value })} 
-                        onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
+                        onChange={e => updateNodeLocal(n.id, { condition: e.target.value }, false)} 
+                        onBlur={() => updateNodeLocal(n.id, { condition: n.condition }, true)}
                       />
                    )}
                    {n.type === 'delay' && (
@@ -553,14 +606,13 @@ export default function App() {
                           type="number" 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-xs font-bold text-white border border-white/5 outline-none focus:border-[#0A84FF]" 
                           value={n.value} 
-                          onFocus={() => { isTypingRef.current = true; }}
-                          onChange={e => updateNodeLocal(n.id, { value: e.target.value })} 
-                          onBlur={() => { isTypingRef.current = false; syncToCloud(journeysList, nodeData, edgeData, true); }}
+                          onChange={e => updateNodeLocal(n.id, { value: e.target.value }, false)} 
+                          onBlur={() => updateNodeLocal(n.id, { value: n.value }, true)}
                         />
                         <select 
                           className="w-1/2 bg-black/40 p-2 rounded-xl text-[10px] font-black text-gray-500 border border-white/5 outline-none cursor-pointer" 
                           value={n.unit} 
-                          onChange={e => { updateNodeLocal(n.id, { unit: e.target.value }); syncToCloud(journeysList, nodeData, edgeData, true); }}
+                          onChange={e => { updateNodeLocal(n.id, { unit: e.target.value }, true); }}
                         >
                            <option>Minutes</option><option>Hours</option><option>Days</option>
                         </select>
