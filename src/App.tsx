@@ -551,9 +551,9 @@ export default function App() {
                   <div onMouseDown={e => { const r = e.currentTarget.closest('div.absolute').getBoundingClientRect(); setDragOffset({ x: e.clientX - r.left, y: e.clientY - r.top }); setDragId(n.id); }}
                     className="px-4 py-[6px] border-b border-white/[0.03] flex justify-between items-center cursor-grab active:cursor-grabbing rounded-t-xl">
                     <span className="text-[8px] font-medium uppercase tracking-[0.15em] text-white/20">{n.channel || n.type}</span>
-                    <div className="flex gap-1 opacity-0 group-hover:opacity-100" onMouseDown={e => e.stopPropagation()}>
-                      <button onClick={() => dupNode(n.id)} className="p-0.5 text-white/15 hover:text-white/40 transition-colors"><Copy size={9} strokeWidth={1.5}/></button>
-                      <button onClick={() => delNode(n.id)} className="p-0.5 text-white/15 hover:text-red-400/50 transition-colors"><Trash2 size={9} strokeWidth={1.5}/></button>
+                    <div className="flex gap-1" onMouseDown={e => e.stopPropagation()}>
+                      <button onClick={() => dupNode(n.id)} className="p-0.5 text-white/30 hover:text-white/60 transition-colors"><Copy size={9} strokeWidth={1.5}/></button>
+                      <button onClick={() => delNode(n.id)} className="p-0.5 text-white/30 hover:text-red-400/70 transition-colors"><Trash2 size={9} strokeWidth={1.5}/></button>
                     </div>
                   </div>
 
