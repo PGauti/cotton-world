@@ -272,6 +272,22 @@ export default function App() {
     if (dragId) { isDraggingRef.current = true; setDragPos({ x, y }); }
   };
 
+  // Also track mouse globally during linking so we never lose position
+  useEffect(() => {
+    if (!linking) return;
+    const move = (e) => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const x = e.clientX - rect.left + el.scrollLeft;
+      const y = e.clientY - rect.top + el.scrollTop;
+      setMousePos({ x, y });
+      mousePosRef.current = { x, y };
+    };
+    window.addEventListener('mousemove', move);
+    return () => window.removeEventListener('mousemove', move);
+  }, [linking]);
+
   const getPos = useCallback((node) => {
     if (dragId === node.id && dragPos) return { x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y };
     return { x: node.x, y: node.y };
@@ -304,13 +320,20 @@ export default function App() {
     const active = nodes[activeJId] || [];
     const lnk = linkingRef.current;
     if (!lnk) return null;
-    let best = null, bestDist = 80;
+    const PAD = 40; // generous padding around each node
+    let best = null, bestDist = Infinity;
     for (const n of active) {
       if (n.id === lnk.fromId || n.type === 'note') continue;
       const pos = getPos(n);
-      const cx = pos.x + 140, cy = pos.y + getH(n) / 2;
-      const dist = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
-      if (dist < bestDist) { best = n.id; bestDist = dist; }
+      const left = pos.x - PAD, top = pos.y - PAD;
+      const right = pos.x + 280 + PAD, bottom = pos.y + getH(n) + PAD;
+      // Is mouse inside the padded bounding box?
+      if (mx >= left && mx <= right && my >= top && my <= bottom) {
+        // Pick the closest one by distance to center
+        const cx = pos.x + 140, cy = pos.y + getH(n) / 2;
+        const dist = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+        if (dist < bestDist) { best = n.id; bestDist = dist; }
+      }
     }
     return best;
   }, [nodes, activeJId, getPos]);
