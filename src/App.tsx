@@ -50,6 +50,7 @@ const SMSIcon = (p) => <Icon {...p} d={<><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a
 const RCSIcon = (p) => <Icon {...p} d={<><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/><circle cx="12" cy="12" r="1"/><circle cx="8" cy="12" r="1"/><circle cx="16" cy="12" r="1"/></>} />;
 const DelayIcon = (p) => <Icon {...p} d={<><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></>} />;
 const SplitIcon = (p) => <Icon {...p} d={<><circle cx="12" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><path d="M12 15V9"/><path d="M9 9l3 3 3-3"/></>} />;
+const NoteIcon = (p) => <Icon {...p} d={<><path d="M15.5 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V8.5L15.5 3z"/><path d="M14 3v6h6"/></>} />;
 
 const INIT_J = [
   { id: 'j1', title: 'Cart Abandonment', desc: 'WhatsApp/RCS + Voice Bot escalation.' },
@@ -254,7 +255,8 @@ export default function App() {
       ...(type === 'action' ? { channel: chan, title: `New ${chan}`, content: '', previewLink: '' } : {}),
       ...(type === 'delay' ? { value: 1, unit: 'Hours' } : {}),
       ...(type === 'split' ? { condition: '' } : {}),
-      ...(type === 'trigger' ? { label: 'New Trigger' } : {})
+      ...(type === 'trigger' ? { label: 'New Trigger' } : {}),
+      ...(type === 'note' ? { label: '', content: '', color: 'yellow' } : {})
     };
     setNodes(prev => { const nd = { ...prev, [activeJId]: [...(prev[activeJId] || []), n] }; latest.current.n = nd; triggerSync(true); return nd; });
   };
@@ -290,10 +292,11 @@ export default function App() {
   // Node heights must match actual rendered size (header + body + padding)
   // Header: py-[6px]*2 + text = ~26px. Body: p-4 = 16px*2 + content.
   const getH = (n) => {
-    if (n.type === 'trigger') return 82;   // header(26) + body(32+24)
-    if (n.type === 'split') return 120;    // header(26) + body(32+22+10+30)
-    if (n.type === 'delay') return 112;    // header(26) + body(32+22+10+22)
-    if (n.type === 'action') return (n.previewLink?.trim()) ? 260 : 215; // textarea+url+maybe preview btn
+    if (n.type === 'trigger') return 82;
+    if (n.type === 'split') return 120;
+    if (n.type === 'delay') return 112;
+    if (n.type === 'action') return (n.previewLink?.trim()) ? 260 : 215;
+    if (n.type === 'note') return 160;
     return 120;
   };
   const svgPath = (x1, y1, x2, y2) => { const c = Math.max(60, Math.abs(y2 - y1) / 2); return `M${x1},${y1} C${x1},${y1 + c} ${x2},${y2 - c} ${x2},${y2}`; };
@@ -442,6 +445,8 @@ export default function App() {
             <TBtn icon={<RCSIcon size={13}/>} label="RCS" onClick={() => addNode('action', 'RCS')} />
             <TBtn icon={<DelayIcon size={13}/>} label="Wait" onClick={() => addNode('delay')} />
             <TBtn icon={<SplitIcon size={13}/>} label="Split" onClick={() => addNode('split')} />
+            <div className="w-px bg-white/[0.06] mx-0.5" />
+            <TBtn icon={<NoteIcon size={13}/>} label="Note" onClick={() => addNode('note')} />
           </div>
         </header>
 
@@ -488,10 +493,53 @@ export default function App() {
           {curNodes.map(n => {
             const pos = getPos(n);
             const isLinkTarget = linking && linking.fromId !== n.id;
+            const isNote = n.type === 'note';
+
+            // --- STICKY NOTE ---
+            if (isNote) {
+              const noteColors = {
+                yellow: { bg: '#2a2517', border: '#3d3520', text: '#c4a84f', placeholder: '#6b5c2e' },
+                blue:   { bg: '#151c2a', border: '#1e2d42', text: '#5b8ec9', placeholder: '#2e4565' },
+                green:  { bg: '#162017', border: '#1f3320', text: '#5ba85e', placeholder: '#2e5530' },
+                pink:   { bg: '#2a1520', border: '#3d1e2d', text: '#c95b8e', placeholder: '#652e45' },
+              };
+              const c = noteColors[n.color] || noteColors.yellow;
+              return (
+                <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}>
+                  <div className="w-[220px] rounded-lg transition-all duration-150" style={{ background: c.bg, border: `1px solid ${c.border}`, boxShadow: '0 2px 16px rgba(0,0,0,0.4)' }}>
+                    {/* Drag bar + controls */}
+                    <div onMouseDown={e => { const r = e.currentTarget.closest('div.absolute').getBoundingClientRect(); setDragOffset({ x: e.clientX - r.left, y: e.clientY - r.top }); setDragId(n.id); }}
+                      className="px-3 py-1.5 flex justify-between items-center cursor-grab active:cursor-grabbing rounded-t-lg">
+                      <div className="flex gap-1">
+                        {['yellow','blue','green','pink'].map(col => (
+                          <button key={col} onClick={() => updateNode(n.id, { color: col }, true)}
+                            className="w-2.5 h-2.5 rounded-full transition-all hover:scale-125"
+                            style={{ background: noteColors[col].text, opacity: n.color === col ? 1 : 0.3 }} />
+                        ))}
+                      </div>
+                      <div className="flex gap-1" onMouseDown={e => e.stopPropagation()}>
+                        <button onClick={() => dupNode(n.id)} className="p-0.5 transition-colors" style={{ color: c.placeholder }}><Copy size={9} strokeWidth={1.5}/></button>
+                        <button onClick={() => delNode(n.id)} className="p-0.5 hover:text-red-400 transition-colors" style={{ color: c.placeholder }}><Trash2 size={9} strokeWidth={1.5}/></button>
+                      </div>
+                    </div>
+                    {/* Note content */}
+                    <div className="px-3 pb-3 space-y-1.5" onMouseDown={e => e.stopPropagation()}>
+                      <input className="bg-transparent text-[12px] font-semibold outline-none w-full" style={{ color: c.text }}
+                        value={n.label || ''} placeholder="Note title..."
+                        onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { label: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />
+                      <textarea className="w-full bg-transparent text-[10px] leading-relaxed outline-none resize-none h-20" style={{ color: c.text + 'cc' }}
+                        value={n.content || ''} placeholder="Add context, discount codes, notes..."
+                        onFocus={() => { isTypingRef.current = true; }} onChange={e => updateNode(n.id, { content: e.target.value })} onBlur={() => { isTypingRef.current = false; triggerSync(true); }} />
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
+            // --- REGULAR NODES ---
             return (
               <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}
                 onMouseUp={() => { if (isLinkTarget) endLink(n.id); }}>
-                {/* Expanded invisible hit area during linking */}
                 {isLinkTarget && <div className="absolute -inset-4 z-30" onMouseUp={() => endLink(n.id)} />}
                 <div onMouseUp={() => endLink(n.id)}
                   className={`w-[280px] rounded-xl border transition-colors duration-150 ${
