@@ -89,6 +89,7 @@ export default function App() {
 
   const latest = useRef({ j: journeys, n: nodes, e: edges });
   const canvasRef = useRef(null);
+  const scrollRef = useRef(null); // the actual scrollable container
   const [dragId, setDragId] = useState(null);
   const [dragPos, setDragPos] = useState(null);
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -189,7 +190,7 @@ export default function App() {
   }, [user, writeToFirebase]);
 
   useEffect(() => {
-    const up = () => {
+    const up = (e) => {
       // Commit drag position
       if (dragId && dragPos) {
         setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y } : n) }; latest.current.n = nd; return nd; });
@@ -197,10 +198,15 @@ export default function App() {
       }
       setDragId(null); setDragPos(null);
       
-      // DON'T blindly clear linking here — let onMouseUp on nodes handle it via endLink.
-      // But if mouse was released on empty canvas (no node caught it), clear it.
-      // We use a small delay so the node's onMouseUp fires first.
-      setTimeout(() => { if (linkingRef.current) { setLinking(null); linkingRef.current = null; } }, 50);
+      // Only clear linking if mouse was released NOT on a node
+      // Nodes handle their own endLink via onMouseUp
+      // Use a longer delay to let node onMouseUp fire first
+      if (linkingRef.current) {
+        setTimeout(() => {
+          // If linkingRef is still set after 100ms, node didn't catch it — cancel
+          if (linkingRef.current) { setLinking(null); linkingRef.current = null; }
+        }, 100);
+      }
     };
     window.addEventListener('mouseup', up); return () => window.removeEventListener('mouseup', up);
   }, [dragId, dragPos, dragOffset, activeJId, triggerSync]);
@@ -276,10 +282,11 @@ export default function App() {
   const delEdge = (eid) => { setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; }); };
 
   const onCanvasMove = (e) => {
-    if (!canvasRef.current) return;
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left + canvasRef.current.scrollLeft;
-    const y = e.clientY - rect.top + canvasRef.current.scrollTop;
+    const el = scrollRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = e.clientX - rect.left + el.scrollLeft;
+    const y = e.clientY - rect.top + el.scrollTop;
     setMousePos({ x, y });
     if (dragId) { isDraggingRef.current = true; setDragPos({ x, y }); }
   };
@@ -450,7 +457,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="w-full h-full relative overflow-auto" style={{ backgroundImage: 'radial-gradient(#151515 1px, transparent 1px)', backgroundSize: '32px 32px', scrollbarWidth: 'none' }}>
+        <div ref={scrollRef} className="w-full h-full relative overflow-auto" style={{ backgroundImage: 'radial-gradient(#151515 1px, transparent 1px)', backgroundSize: '32px 32px', scrollbarWidth: 'none' }}>
           <svg className="absolute inset-0 pointer-events-none z-0" style={{ width: 5000, height: 5000 }}>
             {curEdges.map(e => {
               const fN = curNodes.find(n => n.id === e.from), tN = curNodes.find(n => n.id === e.to);
@@ -485,14 +492,14 @@ export default function App() {
             {linking && (() => {
               const fn = curNodes.find(n => n.id === linking.fromId); if (!fn) return null;
               const fp = getPos(fn); const off = linking.port === 'true' ? -40 : linking.port === 'false' ? 40 : 0;
-              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#3B82F6" strokeWidth="2" strokeDasharray="4,3" fill="none" opacity="0.6" />;
+              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#3B82F6" strokeWidth="2.5" strokeDasharray="6,4" fill="none" opacity="0.7" />;
             })()}
           </svg>
 
           {/* NODES */}
           {curNodes.map(n => {
             const pos = getPos(n);
-            const isLinkTarget = linking && linking.fromId !== n.id;
+            const isLinkTarget = linking && linking.fromId !== n.id && n.type !== 'note';
             const isNote = n.type === 'note';
 
             // --- STICKY NOTE ---
@@ -543,7 +550,7 @@ export default function App() {
                 {isLinkTarget && <div className="absolute -inset-4 z-30" onMouseUp={() => endLink(n.id)} />}
                 <div onMouseUp={() => endLink(n.id)}
                   className={`w-[280px] rounded-xl border transition-colors duration-150 ${
-                    dragId === n.id ? 'border-white/[0.08] z-50' : linking && linking.fromId !== n.id ? 'border-blue-500/20 z-40' : 'border-white/[0.04] hover:border-white/[0.06] z-20'
+                    dragId === n.id ? 'border-white/[0.08] z-50' : isLinkTarget ? 'border-blue-500/40 shadow-[0_0_20px_rgba(59,130,246,0.15)] z-40' : 'border-white/[0.04] hover:border-white/[0.06] z-20'
                   }`}
                   style={{ background: '#121212', boxShadow: '0 1px 12px rgba(0,0,0,0.5)' }}>
 
@@ -590,21 +597,22 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Port */}
-                  <div className="absolute -bottom-2 left-0 w-full flex justify-center z-30 pointer-events-none">
-                    <div className="pointer-events-auto relative group flex items-center justify-center bg-[#181818] border border-white/[0.05] rounded-full h-[18px] hover:h-5 hover:px-0.5 transition-all cursor-pointer">
-                      {n.type === 'split' ? (
-                        <>
-                          <div className="w-4 h-full flex items-center justify-center text-white/20 group-hover:hidden"><Plus size={10} strokeWidth={1.5}/></div>
-                          <div className="hidden group-hover:flex gap-0.5">
-                            <button onMouseDown={e => startLink(e, n.id, 'true')} className="w-3.5 h-3.5 rounded-full bg-green-500/10 text-green-400/60 hover:bg-green-500 hover:text-white flex items-center justify-center transition-all"><Check size={8} strokeWidth={3}/></button>
-                            <button onMouseDown={e => startLink(e, n.id, 'false')} className="w-3.5 h-3.5 rounded-full bg-red-500/10 text-red-400/60 hover:bg-red-500 hover:text-white flex items-center justify-center transition-all"><X size={8} strokeWidth={3}/></button>
-                          </div>
-                        </>
-                      ) : (
-                        <button onMouseDown={e => startLink(e, n.id, 'default')} className="w-4 h-full flex items-center justify-center text-white/20 hover:text-blue-400/60 transition-colors"><Plus size={10} strokeWidth={1.5}/></button>
-                      )}
-                    </div>
+                  {/* Port — connector output */}
+                  <div className="absolute -bottom-3 left-0 w-full flex justify-center z-30">
+                    {n.type === 'split' ? (
+                      <div className="flex gap-1 items-center">
+                        <button onPointerDown={e => startLink(e, n.id, 'true')}
+                          className="w-6 h-6 rounded-full bg-[#181818] border border-green-500/30 text-green-400/70 hover:bg-green-500/20 hover:text-green-400 flex items-center justify-center transition-all cursor-crosshair"
+                          title="Yes path"><Check size={11} strokeWidth={2.5}/></button>
+                        <button onPointerDown={e => startLink(e, n.id, 'false')}
+                          className="w-6 h-6 rounded-full bg-[#181818] border border-red-500/30 text-red-400/70 hover:bg-red-500/20 hover:text-red-400 flex items-center justify-center transition-all cursor-crosshair"
+                          title="No path"><X size={11} strokeWidth={2.5}/></button>
+                      </div>
+                    ) : (
+                      <button onPointerDown={e => startLink(e, n.id, 'default')}
+                        className="w-6 h-6 rounded-full bg-[#181818] border border-white/[0.08] text-white/30 hover:border-white/20 hover:text-white/60 flex items-center justify-center transition-all cursor-crosshair"
+                        title="Drag to connect"><Plus size={12} strokeWidth={2}/></button>
+                    )}
                   </div>
                 </div>
               </div>
