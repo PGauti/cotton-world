@@ -97,6 +97,7 @@ export default function App() {
   const [linking, setLinking] = useState(null);
   const linkingRef = useRef(null); // mirrors linking state for global mouseup
   const [mousePos, setMousePos] = useState({ x: 0, y: 0 });
+  const mousePosRef = useRef({ x: 0, y: 0 });
   const isTypingRef = useRef(false);
   const isSyncing = useRef(false);
 
@@ -190,7 +191,7 @@ export default function App() {
   }, [user, writeToFirebase]);
 
   useEffect(() => {
-    const up = (e) => {
+    const up = () => {
       // Commit drag position
       if (dragId && dragPos) {
         setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y } : n) }; latest.current.n = nd; return nd; });
@@ -198,18 +199,14 @@ export default function App() {
       }
       setDragId(null); setDragPos(null);
       
-      // Only clear linking if mouse was released NOT on a node
-      // Nodes handle their own endLink via onMouseUp
-      // Use a longer delay to let node onMouseUp fire first
+      // AUTO-SNAP: if linking, find nearest node and connect (or cancel)
       if (linkingRef.current) {
-        setTimeout(() => {
-          // If linkingRef is still set after 100ms, node didn't catch it — cancel
-          if (linkingRef.current) { setLinking(null); linkingRef.current = null; }
-        }, 100);
+        const target = findSnapTarget(mousePosRef.current.x, mousePosRef.current.y);
+        completeLink(target); // connects if target found, cancels if null
       }
     };
     window.addEventListener('mouseup', up); return () => window.removeEventListener('mouseup', up);
-  }, [dragId, dragPos, dragOffset, activeJId, triggerSync]);
+  }, [dragId, dragPos, dragOffset, activeJId, triggerSync, findSnapTarget, completeLink]);
 
   // --- ADMIN ---
   const handleSaveMaster = async () => {
@@ -270,15 +267,41 @@ export default function App() {
   const delNode = (id) => { setNodes(p => { const nd = { ...p, [activeJId]: (p[activeJId] || []).filter(n => n.id !== id) }; latest.current.n = nd; return nd; }); setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.from !== id && e.to !== id) }; latest.current.e = ed; triggerSync(true); return ed; }); };
   const updateNode = (id, upd, force = false) => { setNodes(p => { const nd = { ...p, [activeJId]: (p[activeJId] || []).map(n => n.id === id ? { ...n, ...upd } : n) }; latest.current.n = nd; triggerSync(force); return nd; }); };
 
-  const startLink = (e, id, port) => { e.stopPropagation(); e.preventDefault(); const lnk = { fromId: id, port }; setLinking(lnk); linkingRef.current = lnk; };
-  const endLink = (tid) => {
+  // --- LINKING: drag-based with auto-snap ---
+  const startLink = (e, id, port) => {
+    e.stopPropagation();
+    // DO NOT call e.preventDefault() — it kills mousemove in Chrome
+    const lnk = { fromId: id, port };
+    setLinking(lnk);
+    linkingRef.current = lnk;
+  };
+
+  // Find nearest eligible node within snap distance
+  const findSnapTarget = useCallback((mx, my) => {
+    const active = nodes[activeJId] || [];
     const lnk = linkingRef.current;
-    if (lnk && lnk.fromId !== tid) {
-      const ne = { id: `e-${Date.now()}`, from: lnk.fromId, to: tid, port: lnk.port };
+    if (!lnk) return null;
+    let best = null, bestDist = 80; // 80px snap radius
+    for (const n of active) {
+      if (n.id === lnk.fromId || n.type === 'note') continue;
+      const pos = getPos(n);
+      const cx = pos.x + 140, cy = pos.y + getH(n) / 2;
+      const dist = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+      if (dist < bestDist) { best = n.id; bestDist = dist; }
+    }
+    return best;
+  }, [nodes, activeJId, getPos]);
+
+  const completeLink = useCallback((targetId) => {
+    const lnk = linkingRef.current;
+    if (lnk && targetId && lnk.fromId !== targetId) {
+      const ne = { id: `e-${Date.now()}`, from: lnk.fromId, to: targetId, port: lnk.port };
       setEdges(p => { const ed = { ...p, [activeJId]: [...(p[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; });
     }
-    setLinking(null); linkingRef.current = null;
-  };
+    setLinking(null);
+    linkingRef.current = null;
+  }, [activeJId, triggerSync]);
+
   const delEdge = (eid) => { setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; }); };
 
   const onCanvasMove = (e) => {
@@ -288,6 +311,7 @@ export default function App() {
     const x = e.clientX - rect.left + el.scrollLeft;
     const y = e.clientY - rect.top + el.scrollTop;
     setMousePos({ x, y });
+    mousePosRef.current = { x, y };
     if (dragId) { isDraggingRef.current = true; setDragPos({ x, y }); }
   };
 
@@ -492,14 +516,33 @@ export default function App() {
             {linking && (() => {
               const fn = curNodes.find(n => n.id === linking.fromId); if (!fn) return null;
               const fp = getPos(fn); const off = linking.port === 'true' ? -40 : linking.port === 'false' ? 40 : 0;
-              return <path d={svgPath(fp.x + 140 + off, fp.y + getH(fn), mousePos.x, mousePos.y)} stroke="#3B82F6" strokeWidth="2.5" strokeDasharray="6,4" fill="none" opacity="0.7" />;
+              const x1 = fp.x + 140 + off, y1 = fp.y + getH(fn);
+              
+              // Check if mouse is near a target — snap wire to it
+              const snapId = findSnapTarget(mousePos.x, mousePos.y);
+              let x2 = mousePos.x, y2 = mousePos.y;
+              let wireColor = '#3B82F6', wireOpacity = '0.5';
+              if (snapId) {
+                const tgt = curNodes.find(n => n.id === snapId);
+                if (tgt) {
+                  const tp = getPos(tgt);
+                  x2 = tp.x + 140; y2 = tp.y;
+                  wireColor = linking.port === 'true' ? '#22C55E' : linking.port === 'false' ? '#EF4444' : '#3B82F6';
+                  wireOpacity = '0.8';
+                }
+              }
+              
+              return <path d={svgPath(x1, y1, x2, y2)} stroke={wireColor} strokeWidth="2.5" strokeDasharray={snapId ? "0" : "6,4"} fill="none" opacity={wireOpacity} style={{ transition: 'opacity 0.1s' }} />;
             })()}
           </svg>
 
           {/* NODES */}
-          {curNodes.map(n => {
+          {(() => {
+            const snapTargetId = linking ? findSnapTarget(mousePos.x, mousePos.y) : null;
+            return curNodes.map(n => {
             const pos = getPos(n);
             const isLinkTarget = linking && linking.fromId !== n.id && n.type !== 'note';
+            const isSnapTarget = snapTargetId === n.id;
             const isNote = n.type === 'note';
 
             // --- STICKY NOTE ---
@@ -545,12 +588,13 @@ export default function App() {
 
             // --- REGULAR NODES ---
             return (
-              <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}
-                onMouseUp={() => { if (isLinkTarget) endLink(n.id); }}>
-                {isLinkTarget && <div className="absolute -inset-4 z-30" onMouseUp={() => endLink(n.id)} />}
-                <div onMouseUp={() => endLink(n.id)}
+              <div key={n.id} className="absolute z-20" style={{ left: pos.x, top: pos.y, willChange: dragId === n.id ? 'transform' : 'auto' }}>
+                <div
                   className={`w-[280px] rounded-xl border transition-colors duration-150 ${
-                    dragId === n.id ? 'border-white/[0.08] z-50' : isLinkTarget ? 'border-blue-500/40 shadow-[0_0_20px_rgba(59,130,246,0.15)] z-40' : 'border-white/[0.04] hover:border-white/[0.06] z-20'
+                    dragId === n.id ? 'border-white/[0.08] z-50'
+                    : isSnapTarget ? 'border-blue-400/60 shadow-[0_0_30px_rgba(59,130,246,0.25)] z-40'
+                    : isLinkTarget ? 'border-white/[0.08] z-30'
+                    : 'border-white/[0.04] hover:border-white/[0.06] z-20'
                   }`}
                   style={{ background: '#121212', boxShadow: '0 1px 12px rgba(0,0,0,0.5)' }}>
 
@@ -617,7 +661,8 @@ export default function App() {
                 </div>
               </div>
             );
-          })}
+          });
+          })()}
         </div>
       </main>
       <style>{`@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}`}</style>
