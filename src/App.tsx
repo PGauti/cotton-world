@@ -190,23 +190,6 @@ export default function App() {
     return () => { window.removeEventListener('beforeunload', onUnload); document.removeEventListener('visibilitychange', onVis); };
   }, [user, writeToFirebase]);
 
-  useEffect(() => {
-    const up = () => {
-      // Commit drag position
-      if (dragId && dragPos) {
-        setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y } : n) }; latest.current.n = nd; return nd; });
-        triggerSync(true); isDraggingRef.current = false;
-      }
-      setDragId(null); setDragPos(null);
-      
-      // AUTO-SNAP: if linking, find nearest node and connect (or cancel)
-      if (linkingRef.current) {
-        const target = findSnapTarget(mousePosRef.current.x, mousePosRef.current.y);
-        completeLink(target); // connects if target found, cancels if null
-      }
-    };
-    window.addEventListener('mouseup', up); return () => window.removeEventListener('mouseup', up);
-  }, [dragId, dragPos, dragOffset, activeJId, triggerSync, findSnapTarget, completeLink]);
 
   // --- ADMIN ---
   const handleSaveMaster = async () => {
@@ -276,32 +259,6 @@ export default function App() {
     linkingRef.current = lnk;
   };
 
-  // Find nearest eligible node within snap distance
-  const findSnapTarget = useCallback((mx, my) => {
-    const active = nodes[activeJId] || [];
-    const lnk = linkingRef.current;
-    if (!lnk) return null;
-    let best = null, bestDist = 80; // 80px snap radius
-    for (const n of active) {
-      if (n.id === lnk.fromId || n.type === 'note') continue;
-      const pos = getPos(n);
-      const cx = pos.x + 140, cy = pos.y + getH(n) / 2;
-      const dist = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
-      if (dist < bestDist) { best = n.id; bestDist = dist; }
-    }
-    return best;
-  }, [nodes, activeJId, getPos]);
-
-  const completeLink = useCallback((targetId) => {
-    const lnk = linkingRef.current;
-    if (lnk && targetId && lnk.fromId !== targetId) {
-      const ne = { id: `e-${Date.now()}`, from: lnk.fromId, to: targetId, port: lnk.port };
-      setEdges(p => { const ed = { ...p, [activeJId]: [...(p[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; });
-    }
-    setLinking(null);
-    linkingRef.current = null;
-  }, [activeJId, triggerSync]);
-
   const delEdge = (eid) => { setEdges(p => { const ed = { ...p, [activeJId]: (p[activeJId] || []).filter(e => e.id !== eid) }; latest.current.e = ed; triggerSync(true); return ed; }); };
 
   const onCanvasMove = (e) => {
@@ -341,6 +298,48 @@ export default function App() {
       y: u*u*u*y1 + 3*u*u*t*cp1y + 3*u*t*t*cp2y + t*t*t*y2
     };
   };
+
+  // --- SNAP TARGET FINDER (must be after getPos and getH) ---
+  const findSnapTarget = useCallback((mx, my) => {
+    const active = nodes[activeJId] || [];
+    const lnk = linkingRef.current;
+    if (!lnk) return null;
+    let best = null, bestDist = 80;
+    for (const n of active) {
+      if (n.id === lnk.fromId || n.type === 'note') continue;
+      const pos = getPos(n);
+      const cx = pos.x + 140, cy = pos.y + getH(n) / 2;
+      const dist = Math.sqrt((mx - cx) ** 2 + (my - cy) ** 2);
+      if (dist < bestDist) { best = n.id; bestDist = dist; }
+    }
+    return best;
+  }, [nodes, activeJId, getPos]);
+
+  const completeLink = useCallback((targetId) => {
+    const lnk = linkingRef.current;
+    if (lnk && targetId && lnk.fromId !== targetId) {
+      const ne = { id: `e-${Date.now()}`, from: lnk.fromId, to: targetId, port: lnk.port };
+      setEdges(p => { const ed = { ...p, [activeJId]: [...(p[activeJId] || []), ne] }; latest.current.e = ed; triggerSync(true); return ed; });
+    }
+    setLinking(null);
+    linkingRef.current = null;
+  }, [activeJId, triggerSync]);
+
+  // --- GLOBAL MOUSEUP: drag commit + auto-snap linking ---
+  useEffect(() => {
+    const up = () => {
+      if (dragId && dragPos) {
+        setNodes(prev => { const nd = { ...prev, [activeJId]: (prev[activeJId] || []).map(n => n.id === dragId ? { ...n, x: dragPos.x - dragOffset.x, y: dragPos.y - dragOffset.y } : n) }; latest.current.n = nd; return nd; });
+        triggerSync(true); isDraggingRef.current = false;
+      }
+      setDragId(null); setDragPos(null);
+      if (linkingRef.current) {
+        const target = findSnapTarget(mousePosRef.current.x, mousePosRef.current.y);
+        completeLink(target);
+      }
+    };
+    window.addEventListener('mouseup', up); return () => window.removeEventListener('mouseup', up);
+  }, [dragId, dragPos, dragOffset, activeJId, triggerSync, findSnapTarget, completeLink]);
 
   const curNodes = nodes[activeJId] || [];
   const curEdges = edges[activeJId] || [];
